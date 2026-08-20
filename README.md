@@ -2,17 +2,14 @@
 
 A combat meter for 1.12 WoW, built on [Nampower](https://gitea.com/avitasia/nampower)'s structured combat events instead of parsing chat-log text.
 
+![Main window](screenshots/main.png)
+![Options](screenshots/options.png)
+
 <!--
-Screenshots go here. Suggested set:
-  screenshots/main.png        - the main meter window (Damage Done, a few bars)
+More screenshots welcome here, e.g.:
   screenshots/breakdown.png   - the per-ability/per-target breakdown window
   screenshots/threat.png      - Threat mode, tank marker + pull aggro bar visible
   screenshots/multiwindow.png - two+ windows open in different modes side by side
-Drop the images in a `screenshots/` folder and swap the block below in.
-
-![Main window](screenshots/main.png)
-![Breakdown window](screenshots/breakdown.png)
-![Threat mode](screenshots/threat.png)
 -->
 
 ## Why that matters
