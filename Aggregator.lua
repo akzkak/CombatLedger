@@ -1,0 +1,850 @@
+--[[
+    Aggregator - encounter lifecycle and per-unit/per-spell recording.
+
+    One data shape for the live encounter, the session-long "Overall"
+    accumulator, and saved history, so the breakdown window can render
+    any of them without duplicate code:
+
+        encounter = {
+            label, zone, startTime, timestamp, duration,
+            units = {
+                [guid] = {
+                    name, class, isPlayer,
+                    damageDone  = { total, spells = { [spellId] = {name, school, hits, crits, total, min, max} }, melee = {hits, crits, total, min, max} },
+                    healingDone = { total, overheal, spells = { ... } },
+                    damageTaken = { total, spells = { ... }, melee = { ... } },
+                    deaths,
+                },
+            },
+        }
+
+    Melee (spellId == nil) is recorded into `.melee` instead of `.spells`
+    so it doesn't need a fake spell ID.
+
+    Every Record* call writes into BOTH `current` (the live fight, reset
+    per encounter) and `overall` (a running total since login/last
+    manual reset) - two independent unit tables receiving the same
+    events, not one feeding the other.
+]]
+
+local CL = CombatLedger
+
+local current = nil -- the live encounter, or nil if not in one
+
+-- startTime uses GetTime() (session-relative float, matches what the live
+-- meter and PrintStatus subtract it against for elapsed/DPS math) - not
+-- time() (epoch seconds): a time()-based startTime would make
+-- GetTime() - startTime a huge negative number, silently pinning every
+-- live duration read to the "<= 0" fallback of 1 second forever.
+local function NewEncounter()
+    return {
+        label = nil,
+        zone = (GetRealZoneText and GetRealZoneText()) or "",
+        startTime = GetTime(),
+        units = {},
+        activeDuration = 0, -- only meaningful for `overall` (see GetOverallDuration) - sum of finished encounters' durations, so idle time between pulls doesn't dilute Overall DPS
+        pullBy = nil, -- { name, label } - set once, from whoever's action started this encounter
+        mobTally = {}, -- [guid] = damage dealt to it by tracked casters - label-only, not a real bar entry (mobs are deliberately excluded from units)
+        mobHealth = {}, -- [guid] = highest UnitHealthMax(guid) sampled for it - label-only, same reasoning as mobTally (see History.lua's ComputeLabel)
+    }
+end
+
+local overall = NewEncounter() -- long-lived; only cleared by ResetOverall()
+
+-- Death recap: a short rolling per-unit hit history, independent of the
+-- aggregated totals above - "what actually killed me in the last few
+-- seconds", which needs the raw sequence, not a sum. Nampower's GUID
+-- resolution is what makes attributing each hit to a real attacker name
+-- reliable here; chat-text parsing can't do this nearly as cleanly.
+local RECAP_WINDOW = 10 -- seconds of history kept per tracked unit
+local recapBuffers = {} -- [guid] = { {time, attacker, label, amount, isCrit}, ... }, oldest first
+local lastDeathRecap = {} -- [guid] = { deathTime, hits = {...snapshot...} }
+
+local function RecordRecapHit(guid, attacker, label, amount, isCrit)
+    local buf = recapBuffers[guid]
+    if not buf then
+        buf = {}
+        recapBuffers[guid] = buf
+    end
+    table.insert(buf, { time = GetTime(), attacker = attacker, label = label, amount = amount, isCrit = isCrit })
+
+    local cutoff = GetTime() - RECAP_WINDOW
+    while table.getn(buf) > 0 and buf[1].time < cutoff do
+        table.remove(buf, 1)
+    end
+end
+
+local function SnapshotDeathRecap(guid)
+    local buf = recapBuffers[guid]
+    local copy = {}
+    if buf then
+        local i
+        for i = 1, table.getn(buf) do
+            copy[i] = buf[i]
+        end
+    end
+    lastDeathRecap[guid] = { deathTime = GetTime(), hits = copy }
+end
+
+local function GetDeathRecap(guid)
+    return guid and lastDeathRecap[guid]
+end
+
+local function NewAvoided()
+    return { miss = 0, dodge = 0, parry = 0, block = 0, evade = 0, immune = 0, deflect = 0, other = 0 }
+end
+
+-- Avoidance only ever applies to melee (see RecordAvoidance - AUTO_ATTACK
+-- is the only source of it on this server), so it lives on the
+-- melee/petMelee entry itself rather than the whole bucket - that's what
+-- lets the breakdown window's hover show "this ability's" own dodge/
+-- parry/miss numbers instead of a bucket-wide total that doesn't
+-- actually belong to any one ability.
+local function NewMeleeEntry()
+    return { hits = 0, crits = 0, total = 0, critTotal = 0, min = nil, max = nil, avoided = NewAvoided() }
+end
+
+local function NewBucket()
+    return {
+        total = 0,
+        spells = {},
+        melee = NewMeleeEntry(),
+        -- Off-hand swings carry hitInfo's 0x04 bit same as everything
+        -- else, so a dual-wielder's off-hand is trackable as its own
+        -- line rather than blending into "Melee".
+        offhand = NewMeleeEntry(),
+        -- Pet melee is bucketed separately from the owner's own melee -
+        -- both roll into the same unit/total (see AttributedGuid), but a
+        -- caster's "Auto Attack" line showing pet swings they never threw
+        -- themselves is misleading in the breakdown window.
+        petMelee = NewMeleeEntry(),
+        petOffhand = NewMeleeEntry(),
+        -- Only populated for damageDone: who this damage actually landed
+        -- on, [targetGuid] = { name, total, hits } - lets the breakdown
+        -- window answer "did this damage go to the boss, or somewhere
+        -- else" (padding on trash instead of the actual target).
+        targets = {},
+    }
+end
+
+-- Pets roll up under their owner's bar (a Hunter's or Warlock's pet
+-- damage reads as "theirs" in every real meter) rather than showing as
+-- a separate row - redirect the guid used for bucketing, but only that;
+-- IsRelevant/roster checks elsewhere still key off the pet's own guid.
+local function AttributedGuid(guid)
+    if CL.GuidCache and CL.GuidCache.GetOwner then
+        local owner = CL.GuidCache.GetOwner(guid)
+        if owner then return owner end
+    end
+    return guid
+end
+
+local function EnsureUnit(units, guid)
+    local u = units[guid]
+    if not u then
+        local info = CL.GuidCache and CL.GuidCache.Resolve(guid)
+        u = {
+            name = (info and info.name) or guid,
+            class = info and info.class,
+            classToken = info and info.classToken,
+            isPlayer = info and info.isPlayer,
+            damageDone = NewBucket(),
+            -- `targets` here is who was healed (recipients), same idea
+            -- as damageDone.targets - lets the breakdown window answer
+            -- "who did this healing actually go to" the same way it
+            -- already answers "who did this damage actually go to".
+            healingDone = { total = 0, overheal = 0, spells = {}, targets = {} },
+            damageTaken = NewBucket(),
+            -- Dispels/cleanses - total is a COUNT (not an amount), same
+            -- bucket shape (spells/targets) as everything else so the
+            -- breakdown window's generic code works unmodified. Built on
+            -- SPELL_DISPEL_BY_SELF/OTHER (casterGuid, targetGuid,
+            -- spellId), not text parsing, so there's no cast/fade
+            -- correlation heuristic needed to avoid miscounting a
+            -- natural expiration.
+            cleanses = { total = 0, spells = {}, targets = {} },
+            -- Debuffs given - same count-only shape as cleanses. Built
+            -- by correlating AURA_CAST_ON_* (has caster+target, no
+            -- reliable buff/debuff classification) with the immediately-
+            -- following DEBUFF_ADDED_* (has the reliable classification,
+            -- no caster) by matching (targetGuid, spellId) - see
+            -- Events.lua's correlation buffer. Buffs Given was built the
+            -- same way but is hidden: prebuffing happens out of combat,
+            -- before the encounter it was for even starts, so it
+            -- doesn't fit this addon's per-encounter model; a live
+            -- "which raid buffs is each person missing" checker is a
+            -- different, deferred feature.
+            debuffsGiven = { total = 0, spells = {}, targets = {} },
+            -- Interrupts - same count-only shape again, built on two
+            -- separate signals (see Events.lua): a TRUE signal for melee
+            -- "special attack" interrupts (Kick/Pummel) via AUTO_ATTACK's
+            -- victimState field, and a known-spell-name heuristic for
+            -- pure spell-cast interrupts (Counterspell/Spell Lock, which
+            -- deal no damage and have no dedicated interrupt event from
+            -- Nampower - same tradeoff GreedMeter's own interrupt tracker
+            -- accepts, just built on a structured SPELL_GO landing
+            -- instead of parsing a chat message).
+            interrupts = { total = 0, spells = {}, targets = {} },
+            deaths = 0,
+        }
+        units[guid] = u
+    end
+    return u
+end
+
+local function EnsureSpellEntry(spells, spellId, name, school)
+    local s = spells[spellId]
+    if not s then
+        s = { name = name, school = school, hits = 0, crits = 0, total = 0, critTotal = 0, min = nil, max = nil }
+        spells[spellId] = s
+    end
+    return s
+end
+
+local function RecordHit(entry, amount, isCrit)
+    entry.hits = entry.hits + 1
+    entry.total = entry.total + amount
+    if isCrit then
+        entry.crits = entry.crits + 1
+        entry.critTotal = (entry.critTotal or 0) + amount
+    end
+    if not entry.min or amount < entry.min then entry.min = amount end
+    if not entry.max or amount > entry.max then entry.max = amount end
+end
+
+local lastFinished = nil -- frozen snapshot of the previous fight, shown as "Current Fight" between pulls
+
+local function StartEncounter()
+    if current then return end
+    current = NewEncounter()
+    lastFinished = nil -- a new fight is live - stop showing the frozen previous one
+    if CL.debug then CL.Print("Encounter started.") end
+end
+
+local function GetCurrent()
+    return current
+end
+
+-- What "Current Fight" should actually display: the live encounter
+-- while one's running, otherwise the last one that finished (frozen,
+-- not cleared) until the next pull starts. Without this, Current Fight
+-- would go blank the instant the grace/idle timeout ends the encounter,
+-- rather than staying up to review like Details/Skada do.
+local function GetCurrentDisplay()
+    return current or lastFinished
+end
+
+local function GetOverall()
+    return overall
+end
+
+local function ResetOverall()
+    overall = NewEncounter()
+end
+
+-- Defensive backfill for a unit restored from SavedVariables - a save
+-- written before some field existed (e.g. cleanses/debuffsGiven, or the
+-- .targets recipient tracking added onto healingDone/damageTaken) would
+-- otherwise nil-index the first time a Record* call touches that field.
+-- Same "new fields need defensive re-init" pattern as
+-- CL.GetSetting/CL.GetLayout's EnsureXTable in Core.lua, just per-unit
+-- instead of per-SavedVariable.
+local function BackfillUnit(u)
+    if not u.damageDone then u.damageDone = NewBucket() end
+    if not u.damageDone.targets then u.damageDone.targets = {} end
+    if not u.healingDone then u.healingDone = { total = 0, overheal = 0, spells = {}, targets = {} } end
+    if not u.healingDone.targets then u.healingDone.targets = {} end
+    if not u.damageTaken then u.damageTaken = NewBucket() end
+    if not u.damageTaken.targets then u.damageTaken.targets = {} end
+    if not u.cleanses then u.cleanses = { total = 0, spells = {}, targets = {} } end
+    if not u.debuffsGiven then u.debuffsGiven = { total = 0, spells = {}, targets = {} } end
+    if not u.interrupts then u.interrupts = { total = 0, spells = {}, targets = {} } end
+    if not u.deaths then u.deaths = 0 end
+end
+
+local function BackfillEncounter(enc)
+    if not enc then return end
+    -- Encounter-level scratch fields added after this encounter may not
+    -- have been serialized (mobHealth) - without this, a `current`
+    -- restored across a /reload from an older save would nil-index the
+    -- moment RecordDamage's health sampler touched it.
+    if not enc.mobTally then enc.mobTally = {} end
+    if not enc.mobHealth then enc.mobHealth = {} end
+    if not enc.units then return end
+    local guid, u
+    for guid, u in pairs(enc.units) do
+        BackfillUnit(u)
+    end
+end
+
+-- Saved to CombatLedgerDB.liveState on PLAYER_LOGOUT (which vanilla also
+-- fires on /reload, not just a real logout) and restored on the next
+-- PLAYER_ENTERING_WORLD - see Events.lua. Without this, a mid-raid
+-- /reload would silently wipe the in-progress fight and the whole
+-- session's Overall totals back to zero, since current/overall only
+-- exist as Lua locals otherwise.
+local function SerializeState()
+    return { current = current, overall = overall }
+end
+
+-- `current`'s startTime is a GetTime() value from the PREVIOUS process -
+-- valid across a same-process /reload (GetTime() keeps counting), but
+-- not across a real logout/relogin (GetTime() resets to ~0 on a fresh
+-- client launch, which would make a restored fight look like it started
+-- in the future). Only restores current as still-live when that's
+-- plausible; overall doesn't have this problem (activeDuration is just
+-- an accumulated number, not a GetTime()-relative one).
+local function RestoreState(saved)
+    if not saved then return end
+    if saved.overall then
+        overall = saved.overall
+        BackfillEncounter(overall)
+    end
+    if saved.current and saved.current.startTime and saved.current.startTime <= GetTime() then
+        current = saved.current
+        BackfillEncounter(current)
+    end
+end
+
+-- Overall's displayed duration should only advance while actually
+-- fighting, not across idle gaps between pulls (otherwise standing
+-- around between fights keeps diluting Overall DPS). accumulated
+-- finished-fight time, plus the live in-progress fight if there is one.
+local function GetOverallDuration()
+    local d = overall.activeDuration or 0
+    if current then
+        d = d + (GetTime() - current.startTime)
+    end
+    return d
+end
+
+local function EndEncounter()
+    if not current then return nil end
+    current.duration = GetTime() - current.startTime
+    current.timestamp = time()
+    overall.activeDuration = (overall.activeDuration or 0) + current.duration
+    local finished = current
+    current = nil
+    lastFinished = finished
+    return finished
+end
+
+local function IsTrackedGuid(guid)
+    return guid and CL.GuidCache and CL.GuidCache.IsTracked(guid)
+end
+
+-- Which side of a caster/target pair is the enemy (not on our roster) -
+-- shared by the pull-announcement classification check below and
+-- RecordDamage's own mob tally/health population further down.
+local function EnemyGuidFor(casterGuid, targetGuid)
+    if casterGuid and targetGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
+        return AttributedGuid(targetGuid)
+    elseif casterGuid and targetGuid and IsTrackedGuid(AttributedGuid(targetGuid)) then
+        return AttributedGuid(casterGuid)
+    end
+    return nil
+end
+
+-- This client's SuperWoW lets a raw GUID stand in for a unit token
+-- directly (see GuidCache.lua/RecordDamage's own UnitHealthMax use) -
+-- UnitClassification(guid) resolves right here the same way, as long as
+-- the enemy is actually in range, which it is by definition (we just
+-- recorded a hit involving it). "boss tagged" mirrors TWThreat's own
+-- elite/worldboss-only restriction (see Threat.lua) rather than
+-- inventing a different bar here.
+local function IsBossTaggedEnemy(enemyGuid)
+    if not enemyGuid or not UnitClassification then return false end
+    local ok, classification = pcall(UnitClassification, enemyGuid)
+    if not ok then return false end
+    return classification == "elite" or classification == "worldboss"
+end
+
+-- Which melee sub-entry a dmg=0-or-not auto-attack swing belongs in -
+-- shared by RecordDamageInto and RecordAvoidanceInto so main-hand/
+-- off-hand/pet routing stays in exactly one place.
+local function MeleeEntryFor(bucket, isPet, isOffhand)
+    if isPet then
+        return isOffhand and bucket.petOffhand or bucket.petMelee
+    end
+    return isOffhand and bucket.offhand or bucket.melee
+end
+
+-- casterGuid/targetGuid may each independently be nil (unattributable
+-- source or target) - record whichever side we actually have. Only ever
+-- for roster members though: a bar list should show "us", not whatever
+-- mob happens to be on the other end of the hit (a mob dealing damage
+-- to you is not a "Damage Done" entry for the mob, and a mob you're
+-- hitting is not a "Damage Taken" entry for the mob).
+local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
+    if casterGuid then
+        local attributed = AttributedGuid(casterGuid)
+        if IsTrackedGuid(attributed) then
+            local u = EnsureUnit(units, attributed)
+            u.damageDone.total = u.damageDone.total + amount
+            if spellId then
+                RecordHit(EnsureSpellEntry(u.damageDone.spells, spellId, spellName, school), amount, isCrit)
+            else
+                RecordHit(MeleeEntryFor(u.damageDone, attributed ~= casterGuid, isOffhand), amount, isCrit)
+            end
+
+            if targetGuid then
+                local t = u.damageDone.targets[targetGuid]
+                if not t then
+                    local tinfo = CL.GuidCache and CL.GuidCache.Resolve(targetGuid)
+                    -- Same shape as a damage bucket (spells/melee/offhand/
+                    -- pet variants) so clicking this target in the UI can
+                    -- reuse the exact same per-ability breakdown code as
+                    -- the unit-wide view, just scoped to this one target.
+                    t = {
+                        name = (tinfo and tinfo.name) or targetGuid,
+                        total = 0,
+                        hits = 0,
+                        spells = {},
+                        melee = NewMeleeEntry(),
+                        offhand = NewMeleeEntry(),
+                        petMelee = NewMeleeEntry(),
+                        petOffhand = NewMeleeEntry(),
+                    }
+                    u.damageDone.targets[targetGuid] = t
+                end
+                t.total = t.total + amount
+                t.hits = t.hits + 1
+                if spellId then
+                    RecordHit(EnsureSpellEntry(t.spells, spellId, spellName, school), amount, isCrit)
+                else
+                    RecordHit(MeleeEntryFor(t, attributed ~= casterGuid, isOffhand), amount, isCrit)
+                end
+            end
+        end
+    end
+
+    if targetGuid then
+        local attributed = AttributedGuid(targetGuid)
+        if IsTrackedGuid(attributed) then
+            local u = EnsureUnit(units, attributed)
+            u.damageTaken.total = u.damageTaken.total + amount
+            if spellId then
+                RecordHit(EnsureSpellEntry(u.damageTaken.spells, spellId, spellName, school), amount, isCrit)
+            else
+                RecordHit(MeleeEntryFor(u.damageTaken, attributed ~= targetGuid, isOffhand), amount, isCrit)
+            end
+
+            -- Who this damage actually came from (reuses damageTaken's
+            -- own `targets` field, same bucket-shaped-entry trick as
+            -- damageDone.targets) - the breakdown window shows this as
+            -- "Attackers:" instead of "Targets:" for this mode.
+            if casterGuid then
+                local s = u.damageTaken.targets[casterGuid]
+                if not s then
+                    local sinfo = CL.GuidCache and CL.GuidCache.Resolve(casterGuid)
+                    s = {
+                        name = (sinfo and sinfo.name) or casterGuid,
+                        total = 0, hits = 0, spells = {},
+                        melee = NewMeleeEntry(), offhand = NewMeleeEntry(),
+                        petMelee = NewMeleeEntry(), petOffhand = NewMeleeEntry(),
+                    }
+                    u.damageTaken.targets[casterGuid] = s
+                end
+                s.total = s.total + amount
+                s.hits = s.hits + 1
+                if spellId then
+                    RecordHit(EnsureSpellEntry(s.spells, spellId, spellName, school), amount, isCrit)
+                else
+                    RecordHit(MeleeEntryFor(s, false, isOffhand), amount, isCrit)
+                end
+            end
+        end
+    end
+end
+
+local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
+    if not current then StartEncounter() end
+
+    -- Pull attribution: whoever's action is the first damage event
+    -- against/from a boss-tagged enemy this encounter "pulled" it - set
+    -- once. Stays nil (and keeps re-checking each call) until a
+    -- boss-tagged hit actually happens, so a trash-only encounter never
+    -- claims this and never prints - see CL.GetSetting("announcePulls").
+    if not current.pullBy and casterGuid and IsBossTaggedEnemy(EnemyGuidFor(casterGuid, targetGuid)) then
+        local info = CL.GuidCache and CL.GuidCache.Resolve(casterGuid)
+        current.pullBy = { name = (info and info.name) or casterGuid, label = spellName or "Auto Attack" }
+        if CL.GetSetting("announcePulls") ~= false then
+            CL.Print("Pull: " .. current.pullBy.name .. " (" .. current.pullBy.label .. ")")
+        end
+    end
+
+    RecordDamageInto(current.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
+    RecordDamageInto(overall.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
+
+    -- Tally damage dealt to whatever's NOT a roster member - i.e. the
+    -- mob(s) actually being fought - purely so History.lua can label a
+    -- saved encounter by the toughest thing in the pull. Mobs otherwise
+    -- never get a units entry at all (see RecordDamageInto above).
+    if casterGuid and targetGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
+        local targetAttributed = AttributedGuid(targetGuid)
+        if not IsTrackedGuid(targetAttributed) then
+            current.mobTally[targetAttributed] = (current.mobTally[targetAttributed] or 0) + amount
+
+            -- This client's SuperWoW lets a raw GUID stand in for a unit
+            -- token directly (see GuidCache.lua) - UnitHealthMax(guid)
+            -- resolves right here with no "target"/nameplate token
+            -- needed, as long as the mob is actually in range, which it
+            -- is by definition (we just recorded a hit on it). Keep the
+            -- highest sample seen, not the latest - a mob fought down to
+            -- a sliver shouldn't end up looking small.
+            if UnitHealthMax then
+                local ok, maxHp = pcall(UnitHealthMax, targetAttributed)
+                if ok and maxHp and maxHp > (current.mobHealth[targetAttributed] or 0) then
+                    current.mobHealth[targetAttributed] = maxHp
+                end
+            end
+        end
+    end
+
+    if targetGuid then
+        local attributedTarget = AttributedGuid(targetGuid)
+        if IsTrackedGuid(attributedTarget) then
+            local attackerName = "Environment"
+            if casterGuid then
+                local info = CL.GuidCache and CL.GuidCache.Resolve(casterGuid)
+                attackerName = (info and info.name) or casterGuid
+            end
+            local label = spellName
+            if not label then
+                local isPet = (attributedTarget ~= targetGuid)
+                if isPet then
+                    label = isOffhand and "Pet Off-Hand" or "Pet Auto Attack"
+                else
+                    label = isOffhand and "Off-Hand" or "Auto Attack"
+                end
+            end
+            RecordRecapHit(attributedTarget, attackerName, label, amount, isCrit)
+        end
+    end
+end
+
+local VICTIMSTATE_KEY = {
+    [CL.VICTIMSTATE_MISS] = "miss",
+    [CL.VICTIMSTATE_DODGE] = "dodge",
+    [CL.VICTIMSTATE_PARRY] = "parry",
+    [CL.VICTIMSTATE_BLOCK] = "block",
+    [CL.VICTIMSTATE_EVADE] = "evade",
+    [CL.VICTIMSTATE_IMMUNE] = "immune",
+    [CL.VICTIMSTATE_DEFLECT] = "deflect",
+}
+
+local function RecordAvoidanceInto(units, casterGuid, targetGuid, key, isOffhand)
+    if casterGuid then
+        local attributed = AttributedGuid(casterGuid)
+        if IsTrackedGuid(attributed) then
+            local u = EnsureUnit(units, attributed)
+            local entry = MeleeEntryFor(u.damageDone, attributed ~= casterGuid, isOffhand)
+            entry.avoided[key] = entry.avoided[key] + 1
+        end
+    end
+    if targetGuid then
+        local attributed = AttributedGuid(targetGuid)
+        if IsTrackedGuid(attributed) then
+            local u = EnsureUnit(units, attributed)
+            local entry = MeleeEntryFor(u.damageTaken, attributed ~= targetGuid, isOffhand)
+            entry.avoided[key] = entry.avoided[key] + 1
+        end
+    end
+end
+
+-- A melee swing that connected for 0 damage because it was avoided -
+-- see AUTO_ATTACK's victimState in Events.lua's HandleAutoAttack. Not
+-- routed through RecordDamage since amount is always 0 here; still
+-- writes into both current and overall like every other Record* call.
+local function RecordAvoidance(casterGuid, targetGuid, victimState, isOffhand)
+    if not current then StartEncounter() end
+    local key = VICTIMSTATE_KEY[victimState] or "other"
+    RecordAvoidanceInto(current.units, casterGuid, targetGuid, key, isOffhand)
+    RecordAvoidanceInto(overall.units, casterGuid, targetGuid, key, isOffhand)
+end
+
+local function RecordHealingInto(units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
+    if not casterGuid then return end
+    local attributed = AttributedGuid(casterGuid)
+    if not IsTrackedGuid(attributed) then return end
+    local u = EnsureUnit(units, attributed)
+    u.healingDone.total = u.healingDone.total + amount
+    u.healingDone.overheal = u.healingDone.overheal + (overheal or 0)
+    RecordHit(EnsureSpellEntry(u.healingDone.spells, spellId, spellName, nil), amount, isCrit)
+
+    if targetGuid then
+        local t = u.healingDone.targets[targetGuid]
+        if not t then
+            local tinfo = CL.GuidCache and CL.GuidCache.Resolve(targetGuid)
+            t = { name = (tinfo and tinfo.name) or targetGuid, total = 0, hits = 0, overheal = 0, spells = {} }
+            u.healingDone.targets[targetGuid] = t
+        end
+        t.total = t.total + amount
+        t.hits = t.hits + 1
+        t.overheal = t.overheal + (overheal or 0)
+        RecordHit(EnsureSpellEntry(t.spells, spellId, spellName, nil), amount, isCrit)
+    end
+end
+
+local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
+    if not current then StartEncounter() end
+    RecordHealingInto(current.units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
+    RecordHealingInto(overall.units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
+end
+
+-- Shared by Cleanses/Buffs Given/Debuffs Given - all three are "how many
+-- times did X happen" counts (amount always 1, no "how much" the way
+-- damage/healing have), same bucket shape (spells/targets), so this one
+-- function backs all three instead of three near-identical copies.
+-- `bucketKey` picks which field on the unit record to write into
+-- ("cleanses" / "buffsGiven" / "debuffsGiven").
+local function RecordCountEventInto(units, bucketKey, casterGuid, targetGuid, spellId, spellName)
+    if not casterGuid then return end
+    local attributed = AttributedGuid(casterGuid)
+    if not IsTrackedGuid(attributed) then return end
+    local u = EnsureUnit(units, attributed)
+    local bucket = u[bucketKey]
+    bucket.total = bucket.total + 1
+    RecordHit(EnsureSpellEntry(bucket.spells, spellId, spellName, nil), 1, false)
+
+    if targetGuid then
+        local t = bucket.targets[targetGuid]
+        if not t then
+            local tinfo = CL.GuidCache and CL.GuidCache.Resolve(targetGuid)
+            t = { name = (tinfo and tinfo.name) or targetGuid, total = 0, hits = 0, spells = {} }
+            bucket.targets[targetGuid] = t
+        end
+        t.total = t.total + 1
+        t.hits = t.hits + 1
+        RecordHit(EnsureSpellEntry(t.spells, spellId, spellName, nil), 1, false)
+    end
+end
+
+local function RecordCleanse(casterGuid, targetGuid, spellId, spellName)
+    if not current then StartEncounter() end
+    RecordCountEventInto(current.units, "cleanses", casterGuid, targetGuid, spellId, spellName)
+    RecordCountEventInto(overall.units, "cleanses", casterGuid, targetGuid, spellId, spellName)
+end
+
+local function RecordDebuffGiven(casterGuid, targetGuid, spellId, spellName)
+    if not current then StartEncounter() end
+    RecordCountEventInto(current.units, "debuffsGiven", casterGuid, targetGuid, spellId, spellName)
+    RecordCountEventInto(overall.units, "debuffsGiven", casterGuid, targetGuid, spellId, spellName)
+end
+
+local function RecordInterrupt(casterGuid, targetGuid, spellId, spellName)
+    if not current then StartEncounter() end
+    RecordCountEventInto(current.units, "interrupts", casterGuid, targetGuid, spellId, spellName)
+    RecordCountEventInto(overall.units, "interrupts", casterGuid, targetGuid, spellId, spellName)
+end
+
+local function RecordDeath(guid)
+    local attributed = AttributedGuid(guid)
+    -- Pet deaths deliberately don't roll up to the owner here, unlike
+    -- damage/healing - a Warlock's Voidwalker dying is not the same as
+    -- the Warlock dying, and Deaths is a real UI category people will
+    -- look at directly.
+    if attributed ~= guid then return nil end
+    if not IsTrackedGuid(attributed) then return nil end
+    local u = EnsureUnit(overall.units, attributed)
+    u.deaths = u.deaths + 1
+    if current then
+        local uc = EnsureUnit(current.units, attributed)
+        uc.deaths = uc.deaths + 1
+    end
+    SnapshotDeathRecap(attributed)
+    return attributed
+end
+
+--------------------------------------------------------------------------
+-- Test mode - fabricated encounter for previewing appearance settings
+-- (bar texture/font/size/color) without needing to actually fight
+-- something, same idea as Details' "Create test bars" button. Built
+-- from the same NewEncounter/EnsureUnit/RecordHit helpers real combat
+-- events use, so it's genuinely the same shape - the breakdown window's
+-- click-through works on it same as a real encounter.
+--------------------------------------------------------------------------
+
+local testEncounter = nil -- cached once generated, not regenerated every refresh
+
+-- amount/hits/crit% all scale off `power` (1.0 = top of the pack) so
+-- whichever unit is called with power=1 always sorts first in every
+-- mode, regardless of what real numbers would make sense per-class.
+local function FakeHits(bucket, entry, count, avgAmount, critPct)
+    local i
+    for i = 1, count do
+        local isCrit = (math.random(100) <= critPct)
+        local amount = math.floor(avgAmount * (0.8 + math.random() * 0.4))
+        if isCrit then amount = math.floor(amount * 1.8) end
+        RecordHit(entry, amount, isCrit)
+        bucket.total = bucket.total + amount
+    end
+end
+
+local TEST_SPELLS_WARLOCK = { { id = 172, name = "Corruption", school = "Shadow" }, { id = 686, name = "Shadow Bolt", school = "Shadow" } }
+local TEST_SPELLS_GENERIC = { { id = 133, name = "Fireball", school = "Fire" }, { id = 585, name = "Smite", school = "Holy" } }
+
+local function FakeDamageDone(u, power)
+    local bucket = u.damageDone
+    FakeHits(bucket, bucket.melee, math.floor(18 * power) + 4, 220 * power, 18)
+    local spellList = (u.classToken == "WARLOCK") and TEST_SPELLS_WARLOCK or TEST_SPELLS_GENERIC
+    local i
+    for i = 1, table.getn(spellList) do
+        local sp = spellList[i]
+        local entry = EnsureSpellEntry(bucket.spells, sp.id, sp.name, sp.school)
+        FakeHits(bucket, entry, math.floor(10 * power) + 2, 350 * power, 22)
+    end
+
+    -- Two fake targets so the breakdown window's Targets: list (and the
+    -- "All Enemies" reset row) has something to show too.
+    local bossTotal = math.floor(bucket.total * 0.7)
+    bucket.targets["TESTBOSS"] = { name = "Training Dummy", total = bossTotal, hits = math.floor((bucket.melee.hits or 0) * 0.7), spells = {}, melee = NewMeleeEntry(), offhand = NewMeleeEntry(), petMelee = NewMeleeEntry(), petOffhand = NewMeleeEntry() }
+    bucket.targets["TESTADD1"] = { name = "Training Dummy's Friend", total = bucket.total - bossTotal, hits = math.floor((bucket.melee.hits or 0) * 0.3), spells = {}, melee = NewMeleeEntry(), offhand = NewMeleeEntry(), petMelee = NewMeleeEntry(), petOffhand = NewMeleeEntry() }
+end
+
+local function FakeHealingDone(u, power)
+    local bucket = u.healingDone
+    local entry = EnsureSpellEntry(bucket.spells, 2050, "Lesser Heal", "Holy")
+    local i
+    for i = 1, math.floor(12 * power) + 2 do
+        local isCrit = (math.random(100) <= 15)
+        local amount = math.floor(300 * power * (0.8 + math.random() * 0.4))
+        if isCrit then amount = math.floor(amount * 1.5) end
+        RecordHit(entry, amount, isCrit)
+        bucket.total = bucket.total + amount
+        bucket.overheal = bucket.overheal + math.floor(amount * 0.15)
+    end
+
+    -- Two fake recipients so the breakdown window's "Healed:" list has
+    -- something to show too.
+    local tankTotal = math.floor(bucket.total * 0.6)
+    bucket.targets["TESTTANK"] = { name = "Kaladin", total = tankTotal, hits = math.floor(entry.hits * 0.6), overheal = 0, spells = {} }
+    bucket.targets["TESTSELF"] = { name = u.name, total = bucket.total - tankTotal, hits = entry.hits - math.floor(entry.hits * 0.6), overheal = 0, spells = {} }
+end
+
+local function FakeDamageTaken(u, power)
+    local bucket = u.damageTaken
+    FakeHits(bucket, bucket.melee, math.floor(8 * power) + 3, 150 * power, 10)
+
+    -- One fake attacker so the breakdown window's "Attackers:" list has
+    -- something to show too.
+    bucket.targets["TESTBOSS"] = { name = "Training Dummy", total = bucket.total, hits = bucket.melee.hits, spells = {}, melee = NewMeleeEntry(), offhand = NewMeleeEntry(), petMelee = NewMeleeEntry(), petOffhand = NewMeleeEntry() }
+end
+
+-- Shared by FakeCleanses/FakeDebuffsGiven - fills one count-only bucket
+-- with `count` hits of a single fake ability and one fake recipient,
+-- same shape RecordCountEventInto produces for real.
+local function FakeCountEvent(bucket, spellId, spellName, count, recipientGuid, recipientName)
+    local entry = EnsureSpellEntry(bucket.spells, spellId, spellName, nil)
+    local i
+    for i = 1, count do
+        RecordHit(entry, 1, false)
+        bucket.total = bucket.total + 1
+    end
+    if count > 0 then
+        bucket.targets[recipientGuid] = { name = recipientName, total = count, hits = count, spells = {} }
+    end
+end
+
+local function FakeCleanses(u, power)
+    FakeCountEvent(u.cleanses, 4987, "Cleanse", math.floor(3 * power), "TESTTANK", "Kaladin")
+end
+
+local function FakeDebuffsGiven(u, power)
+    FakeCountEvent(u.debuffsGiven, 172, "Corruption", math.floor(4 * power), "TESTBOSS", "Training Dummy")
+end
+
+local function FakeInterrupts(u, power)
+    FakeCountEvent(u.interrupts, 1766, "Kick", math.floor(2 * power), "TESTBOSS", "Training Dummy")
+end
+
+-- name, classToken, power (1.0 = always tops every mode - "Kobeni the
+-- Warlock" is the player's own character, shown first by design). The
+-- rest of the roster is Stormlight Archive characters, cast against
+-- the classes they fit best.
+local TEST_ROSTER = {
+    { name = "Kobeni", classToken = "WARLOCK", power = 1.0, isPlayer = true },
+    { name = "Kaladin", classToken = "WARRIOR", power = 0.92 },
+    { name = "Szeth", classToken = "ROGUE", power = 0.88 },
+    { name = "Dalinar", classToken = "PALADIN", power = 0.85 },
+    { name = "Shallan", classToken = "MAGE", power = 0.75 },
+    { name = "Jasnah", classToken = "PRIEST", power = 0.7 },
+    { name = "Adolin", classToken = "WARRIOR", power = 0.65 },
+    { name = "Teft", classToken = "HUNTER", power = 0.6 },
+    { name = "Renarin", classToken = "DRUID", power = 0.55 },
+    { name = "Navani", classToken = "SHAMAN", power = 0.5 },
+}
+
+-- Builds the unit record directly rather than going through EnsureUnit -
+-- that calls into GuidCache.Resolve, which expects a real combat GUID
+-- and (on this client) hard-errors on an arbitrary string like
+-- "TESTUNIT1" instead of just returning nil.
+local function NewTestUnit(r)
+    return {
+        name = r.name,
+        class = r.classToken,
+        classToken = r.classToken,
+        isPlayer = r.isPlayer,
+        damageDone = NewBucket(),
+        healingDone = { total = 0, overheal = 0, spells = {}, targets = {} },
+        damageTaken = NewBucket(),
+        cleanses = { total = 0, spells = {}, targets = {} },
+        debuffsGiven = { total = 0, spells = {}, targets = {} },
+        interrupts = { total = 0, spells = {}, targets = {} },
+        deaths = 0,
+    }
+end
+
+local function GenerateTestEncounter()
+    local enc = NewEncounter()
+    enc.label = "Test Data"
+    enc.duration = 60
+    local i
+    for i = 1, table.getn(TEST_ROSTER) do
+        local r = TEST_ROSTER[i]
+        local guid = "TESTUNIT" .. i
+        local u = NewTestUnit(r)
+        enc.units[guid] = u
+        FakeDamageDone(u, r.power)
+        FakeHealingDone(u, r.power)
+        FakeDamageTaken(u, r.power)
+        FakeCleanses(u, r.power)
+        FakeDebuffsGiven(u, r.power)
+    end
+    enc.units["TESTUNIT7"].deaths = 1 -- Adolin - one fake death, for previewing Deaths mode
+    return enc
+end
+
+local function GetTestEncounter()
+    if not testEncounter then
+        testEncounter = GenerateTestEncounter()
+    end
+    return testEncounter
+end
+
+local function ClearTestEncounter()
+    testEncounter = nil
+end
+
+CL.Aggregator = {
+    StartEncounter = StartEncounter,
+    EndEncounter = EndEncounter,
+    GetCurrent = GetCurrent,
+    GetCurrentDisplay = GetCurrentDisplay,
+    GetOverall = GetOverall,
+    GetOverallDuration = GetOverallDuration,
+    ResetOverall = ResetOverall,
+    GetDeathRecap = GetDeathRecap,
+    SnapshotDeathRecap = SnapshotDeathRecap, -- exposed for /cl testdeath - doesn't touch the real death counter
+    RecordDamage = RecordDamage,
+    RecordAvoidance = RecordAvoidance,
+    RecordHealing = RecordHealing,
+    RecordCleanse = RecordCleanse,
+    RecordDebuffGiven = RecordDebuffGiven,
+    RecordInterrupt = RecordInterrupt,
+    RecordDeath = RecordDeath,
+    GetTestEncounter = GetTestEncounter,
+    ClearTestEncounter = ClearTestEncounter,
+    SerializeState = SerializeState,
+    RestoreState = RestoreState,
+}

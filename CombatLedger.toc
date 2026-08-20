@@ -1,0 +1,19 @@
+## Interface: 11200
+## Title: |cffa335eeCombatLedger|r by |cffff0000K|r|cffff7f00o|r|cffffff00b|r|cff00ff00e|r|cff0080ffn|r|cff8b00ffi|r
+## Notes: Combat meter (damage/healing/taken/dispels/debuffs given/deaths/threat, click-through breakdowns, multiple independent windows, saved history, death recap) built on Nampower's structured combat events, not chat-text parsing.
+## Author: curtlandia
+## Version: 0.3.0
+## OptionalDeps: pfUI
+## SavedVariables: CombatLedgerDB
+
+Core.lua
+GuidCache.lua
+Aggregator.lua
+Threat.lua
+Events.lua
+History.lua
+UI_MainWindow.lua
+UI_BreakdownWindow.lua
+UI_DeathRecap.lua
+UI_HistoryWindow.lua
+UI_Options.lua

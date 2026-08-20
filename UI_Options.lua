@@ -1,0 +1,789 @@
+--[[
+    UI_Options - one flat window for everything this addon actually has
+    to configure (lock/minimap/appearance/timing), not an attempt at
+    Details' full skin/profile/automation system. Opened via the main
+    window's "Opt" button, the minimap button's right-click, or
+    /cl options.
+
+    Also owns the minimap button (LootLedger's CreateMinimapButton
+    pattern - draggable icon around the ring, position saved to
+    CombatLedgerDB.minimapAngle) since Options is what controls whether
+    it's shown.
+]]
+
+local CL = CombatLedger
+local OPT = {}
+CL.UIOptions = OPT
+
+local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 450
+local MAX_WINDOW_ROWS = 4 -- most people won't run more than 2-3 extra meter windows at once
+local ROW_HEIGHT = 24
+
+local window = nil
+local minimapButton = nil
+
+--------------------------------------------------------------------------
+-- Small reusable controls
+--------------------------------------------------------------------------
+
+local function CreateSmallButton(parent, width, text)
+    local btn = CreateFrame("Button", nil, parent)
+    btn:SetWidth(width)
+    btn:SetHeight(18)
+    btn:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 8, edgeSize = 8,
+        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+    })
+    btn:SetBackdropColor(0.15, 0.15, 0.15, 0.75)
+    btn:SetBackdropBorderColor(0.55, 0.55, 0.55, 1)
+    local label = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    label:SetAllPoints(btn)
+    label:SetJustifyH("CENTER")
+    label:SetText(text or "")
+    btn.label = label
+    return btn
+end
+
+-- +/- stepper - value display flanked by two small buttons, all anchored
+-- as one unit off the row's TOPRIGHT.
+local function CreateStepper(parent, width)
+    local holder = CreateFrame("Frame", nil, parent)
+    holder:SetWidth(width)
+    holder:SetHeight(18)
+
+    local minus = CreateSmallButton(holder, 16, "-")
+    minus:SetPoint("LEFT", holder, "LEFT", 0, 0)
+
+    local plus = CreateSmallButton(holder, 16, "+")
+    plus:SetPoint("RIGHT", holder, "RIGHT", 0, 0)
+
+    local value = holder:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    value:SetPoint("LEFT", minus, "RIGHT", 2, 0)
+    value:SetPoint("RIGHT", plus, "LEFT", -2, 0)
+    value:SetJustifyH("CENTER")
+
+    holder.minus = minus
+    holder.plus = plus
+    holder.value = value
+    return holder
+end
+
+local function SetControlEnabled(ctrl, enabled)
+    ctrl:SetAlpha(enabled and 1 or 0.4)
+    if ctrl.EnableMouse then ctrl:EnableMouse(enabled) end
+    if ctrl.minus then
+        ctrl.minus:EnableMouse(enabled)
+        ctrl.plus:EnableMouse(enabled)
+    end
+end
+
+local function CycleKey(list, currentKey)
+    local i
+    for i = 1, table.getn(list) do
+        if list[i].key == currentKey then
+            local nextIndex = i + 1
+            if nextIndex > table.getn(list) then nextIndex = 1 end
+            return list[nextIndex].key
+        end
+    end
+    return list[1] and list[1].key
+end
+
+local function LabelForKey(list, key)
+    local i
+    for i = 1, table.getn(list) do
+        if list[i].key == key then return list[i].label end
+    end
+    return "?"
+end
+
+--------------------------------------------------------------------------
+-- Options window
+--------------------------------------------------------------------------
+
+local RefreshOptionsWindow -- forward-declared, assigned below
+
+local function CreateWindow()
+    local f = CreateFrame("Frame", "CombatLedgerOptionsWindow", UIParent)
+    f:SetWidth(WINDOW_WIDTH)
+    f:SetHeight(WINDOW_HEIGHT)
+    f:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    f:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 4, right = 4, top = 4, bottom = 4 },
+    })
+    f:SetBackdropColor(0, 0, 0, 0.9)
+    local themeR, themeG, themeB, themeHex = CL.GetThemeColor()
+    f:SetBackdropBorderColor(themeR, themeG, themeB, 1)
+    f:SetFrameStrata("DIALOG")
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", function() this:StartMoving() end)
+    f:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
+    f:Hide()
+
+    table.insert(UISpecialFrames, "CombatLedgerOptionsWindow")
+
+    local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOP", f, "TOP", 0, -10)
+    title:SetText("|cff" .. themeHex .. "CombatLedger Options|r")
+
+    local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+    closeBtn:SetWidth(18)
+    closeBtn:SetHeight(18)
+    closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
+    closeBtn:SetScript("OnClick", function() f:Hide() end)
+
+    -- Two tabs instead of one long scroll of sections - General (window
+    -- behavior/appearance/bar animation) and Advanced (timing/announce/
+    -- windows). Same "avoid Blizzard's heavier templates" reasoning as
+    -- the rest of this addon's UI (ShowDropdown instead of
+    -- UIDropDownMenu, etc) - two plain buttons + two content frames
+    -- toggled together, not a real TabButtonTemplate strip.
+    local pageGeneral = CreateFrame("Frame", nil, f)
+    pageGeneral:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
+    pageGeneral:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 0)
+    local pageAdvanced = CreateFrame("Frame", nil, f)
+    pageAdvanced:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
+    pageAdvanced:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 0)
+
+    local tabGeneralBtn = CreateSmallButton(f, (WINDOW_WIDTH - 32) / 2, "General")
+    tabGeneralBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 14, -32)
+    local tabAdvancedBtn = CreateSmallButton(f, (WINDOW_WIDTH - 32) / 2, "Advanced")
+    tabAdvancedBtn:SetPoint("LEFT", tabGeneralBtn, "RIGHT", 4, 0)
+
+    local function ShowTab(tab)
+        if tab == "advanced" then
+            pageGeneral:Hide()
+            pageAdvanced:Show()
+            tabGeneralBtn:SetBackdropColor(0.15, 0.15, 0.15, 0.75)
+            tabAdvancedBtn:SetBackdropColor(0.3, 0.25, 0.4, 0.9)
+        else
+            pageAdvanced:Hide()
+            pageGeneral:Show()
+            tabAdvancedBtn:SetBackdropColor(0.15, 0.15, 0.15, 0.75)
+            tabGeneralBtn:SetBackdropColor(0.3, 0.25, 0.4, 0.9)
+        end
+    end
+    tabGeneralBtn:SetScript("OnClick", function() ShowTab("general") end)
+    tabAdvancedBtn:SetScript("OnClick", function() ShowTab("advanced") end)
+    f.tabGeneralBtn = tabGeneralBtn
+    f.tabAdvancedBtn = tabAdvancedBtn
+
+    local yOffset = 60
+    local function NextY()
+        local y = yOffset
+        yOffset = yOffset + ROW_HEIGHT
+        return y
+    end
+
+    -- Window behavior
+    local lockLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    local y = NextY()
+    lockLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    lockLabel:SetText("Lock windows")
+    local lockCB = CreateFrame("CheckButton", "CombatLedgerLockCB", pageGeneral, "UICheckButtonTemplate")
+    lockCB:SetWidth(20)
+    lockCB:SetHeight(20)
+    lockCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+    lockCB:SetScript("OnClick", function()
+        CL.SetSetting("lockWindow", (this:GetChecked() == 1))
+        CL.FireAppearanceChanged()
+    end)
+    f.lockCB = lockCB
+
+    local minimapLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    minimapLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    minimapLabel:SetText("Show minimap button")
+    local minimapCB = CreateFrame("CheckButton", "CombatLedgerMinimapCB", pageGeneral, "UICheckButtonTemplate")
+    minimapCB:SetWidth(20)
+    minimapCB:SetHeight(20)
+    minimapCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+    minimapCB:SetScript("OnClick", function()
+        CL.SetSetting("showMinimapButton", (this:GetChecked() == 1))
+        OPT.RefreshMinimapVisibility()
+    end)
+    f.minimapCB = minimapCB
+
+    local showCombatLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    showCombatLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    showCombatLabel:SetText("Auto-show on combat start")
+    local showCombatCB = CreateFrame("CheckButton", "CombatLedgerShowCombatCB", pageGeneral, "UICheckButtonTemplate")
+    showCombatCB:SetWidth(20)
+    showCombatCB:SetHeight(20)
+    showCombatCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+    showCombatCB:SetScript("OnClick", function()
+        CL.SetSetting("autoShowInCombat", (this:GetChecked() == 1))
+    end)
+    f.showCombatCB = showCombatCB
+
+    local hideCombatLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    hideCombatLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    hideCombatLabel:SetText("Auto-hide out of combat")
+    local hideCombatCB = CreateFrame("CheckButton", "CombatLedgerHideCombatCB", pageGeneral, "UICheckButtonTemplate")
+    hideCombatCB:SetWidth(20)
+    hideCombatCB:SetHeight(20)
+    hideCombatCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+    hideCombatCB:SetScript("OnClick", function()
+        local checked = (this:GetChecked() == 1)
+        CL.SetSetting("autoHideOutOfCombat", checked)
+        -- Take effect right away rather than waiting for the next
+        -- combat transition, which might not come for a while (or ever,
+        -- if you're already out of combat when you flip this either
+        -- way) - checking it hides now if out of combat; unchecking it
+        -- un-hides now if out of combat.
+        if CL.UI and not UnitAffectingCombat("player") then
+            if checked then
+                CL.UI.Hide()
+            else
+                CL.UI.Show()
+            end
+        end
+    end)
+    f.hideCombatCB = hideCombatCB
+
+    -- Appearance
+    local appearanceHeader = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    y = NextY()
+    appearanceHeader:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    appearanceHeader:SetText("|cffffd700Appearance|r")
+
+    local matchPfuiCB
+    if CL.HasPfui() then
+        local matchLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        y = NextY()
+        matchLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+        matchLabel:SetText("Match pfUI (texture + font)")
+        matchPfuiCB = CreateFrame("CheckButton", "CombatLedgerMatchPfuiCB", pageGeneral, "UICheckButtonTemplate")
+        matchPfuiCB:SetWidth(20)
+        matchPfuiCB:SetHeight(20)
+        matchPfuiCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+        matchPfuiCB:SetScript("OnClick", function()
+            CL.SetSetting("matchPfui", (this:GetChecked() == 1))
+            CL.FireAppearanceChanged()
+            RefreshOptionsWindow()
+        end)
+    end
+    f.matchPfuiCB = matchPfuiCB
+
+    local textureLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    textureLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    textureLabel:SetText("Bar texture")
+    local textureBtn = CreateSmallButton(pageGeneral, 130, "")
+    textureBtn:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 1)
+    textureBtn:SetScript("OnClick", function()
+        local cur = CL.GetSetting("barTexture") or "blizzard"
+        CL.SetSetting("barTexture", CycleKey(CL.GetAvailableBarTextures(), cur))
+        CL.FireAppearanceChanged()
+        RefreshOptionsWindow()
+    end)
+    f.textureBtn = textureBtn
+
+    local fontLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    fontLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    fontLabel:SetText("Font")
+    local fontBtn = CreateSmallButton(pageGeneral, 130, "")
+    fontBtn:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 1)
+    fontBtn:SetScript("OnClick", function()
+        local cur = CL.GetSetting("fontKey") or "friz"
+        CL.SetSetting("fontKey", CycleKey(CL.FONTS, cur))
+        CL.FireAppearanceChanged()
+        RefreshOptionsWindow()
+    end)
+    f.fontBtn = fontBtn
+
+    local fontSizeLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    fontSizeLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    fontSizeLabel:SetText("Font size")
+    local fontSizeStepper = CreateStepper(pageGeneral, 90)
+    fontSizeStepper:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 1)
+    fontSizeStepper.minus:SetScript("OnClick", function()
+        local v = (CL.GetSetting("fontSize") or 10) - 1
+        if v < 8 then v = 8 end
+        CL.SetSetting("fontSize", v)
+        CL.FireAppearanceChanged()
+        RefreshOptionsWindow()
+    end)
+    fontSizeStepper.plus:SetScript("OnClick", function()
+        local v = (CL.GetSetting("fontSize") or 10) + 1
+        if v > 18 then v = 18 end
+        CL.SetSetting("fontSize", v)
+        CL.FireAppearanceChanged()
+        RefreshOptionsWindow()
+    end)
+    f.fontSizeStepper = fontSizeStepper
+
+    local barHeightLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    barHeightLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    barHeightLabel:SetText("Bar size")
+    local barHeightStepper = CreateStepper(pageGeneral, 90)
+    barHeightStepper:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 1)
+    barHeightStepper.minus:SetScript("OnClick", function()
+        local v = CL.GetSetting("barHeight") or 18
+        v = v - 1
+        if v < 10 then v = 10 end
+        CL.SetSetting("barHeight", v)
+        CL.FireAppearanceChanged()
+        RefreshOptionsWindow()
+    end)
+    barHeightStepper.plus:SetScript("OnClick", function()
+        local v = CL.GetSetting("barHeight") or 18
+        v = v + 1
+        if v > 32 then v = 32 end
+        CL.SetSetting("barHeight", v)
+        CL.FireAppearanceChanged()
+        RefreshOptionsWindow()
+    end)
+    f.barHeightStepper = barHeightStepper
+
+    local numberFmtLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    numberFmtLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    numberFmtLabel:SetText("Number format")
+    local numberFmtBtn = CreateSmallButton(pageGeneral, 130, "")
+    numberFmtBtn:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 1)
+    numberFmtBtn:SetScript("OnClick", function()
+        local cur = CL.GetSetting("numberFormat") or "abbreviated"
+        CL.SetSetting("numberFormat", CycleKey(CL.NUMBER_FORMATS, cur))
+        CL.FireAppearanceChanged()
+        RefreshOptionsWindow()
+    end)
+    f.numberFmtBtn = numberFmtBtn
+
+    local opacityLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    opacityLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    opacityLabel:SetText("Window opacity")
+    local opacityStepper = CreateStepper(pageGeneral, 90)
+    opacityStepper:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 1)
+    opacityStepper.minus:SetScript("OnClick", function()
+        local v = (CL.GetSetting("windowOpacityPct") or 85) - 5
+        if v < 10 then v = 10 end
+        CL.SetSetting("windowOpacityPct", v)
+        CL.FireAppearanceChanged()
+        RefreshOptionsWindow()
+    end)
+    opacityStepper.plus:SetScript("OnClick", function()
+        local v = (CL.GetSetting("windowOpacityPct") or 85) + 5
+        if v > 100 then v = 100 end
+        CL.SetSetting("windowOpacityPct", v)
+        CL.FireAppearanceChanged()
+        RefreshOptionsWindow()
+    end)
+    f.opacityStepper = opacityStepper
+
+    -- Bar animation
+    local animHeader = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    y = NextY()
+    animHeader:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    animHeader:SetText("|cffffd700Bar Animation|r")
+
+    local smoothLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    smoothLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    smoothLabel:SetText("Smooth bars (main window)")
+    local smoothCB = CreateFrame("CheckButton", "CombatLedgerSmoothCB", pageGeneral, "UICheckButtonTemplate")
+    smoothCB:SetWidth(20)
+    smoothCB:SetHeight(20)
+    smoothCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+    smoothCB:SetScript("OnClick", function()
+        CL.SetSetting("smoothBars", (this:GetChecked() == 1))
+        RefreshOptionsWindow()
+    end)
+    f.smoothCB = smoothCB
+
+    local speedLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    speedLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    speedLabel:SetText("Bar speed")
+    local speedStepper = CreateStepper(pageGeneral, 90)
+    speedStepper:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 1)
+    speedStepper.minus:SetScript("OnClick", function()
+        local v = CL.GetBarSpeed() - 1
+        if v < 1 then v = 1 end
+        CL.SetSetting("barSpeed", v)
+        RefreshOptionsWindow()
+    end)
+    speedStepper.plus:SetScript("OnClick", function()
+        local v = CL.GetBarSpeed() + 1
+        if v > 10 then v = 10 end
+        CL.SetSetting("barSpeed", v)
+        RefreshOptionsWindow()
+    end)
+    f.speedStepper = speedStepper
+
+    -- Advanced tab starts its own row count fresh from the top.
+    -- Encounter-end timing (idle timeout) isn't exposed here - see
+    -- CL.IDLE_SECONDS in Core.lua for why.
+    yOffset = 60
+
+    -- Announce
+    local announceHeader = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    y = NextY()
+    announceHeader:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    announceHeader:SetText("|cffffd700Announce|r")
+
+    local announceChanLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    announceChanLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    announceChanLabel:SetText("Channel")
+    local announceChanBtn = CreateSmallButton(pageAdvanced, 130, "")
+    announceChanBtn:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 1)
+    announceChanBtn:SetScript("OnClick", function()
+        local cur = CL.GetSetting("announceChannel") or "auto"
+        CL.SetSetting("announceChannel", CycleKey(CL.ANNOUNCE_CHANNELS, cur))
+        RefreshOptionsWindow()
+    end)
+    f.announceChanBtn = announceChanBtn
+
+    local announceCountLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    announceCountLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    announceCountLabel:SetText("Announce top")
+    local announceCountStepper = CreateStepper(pageAdvanced, 90)
+    announceCountStepper:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 1)
+    announceCountStepper.minus:SetScript("OnClick", function()
+        local v = (CL.GetSetting("announceCount") or 5) - 1
+        if v < 1 then v = 1 end
+        CL.SetSetting("announceCount", v)
+        RefreshOptionsWindow()
+    end)
+    announceCountStepper.plus:SetScript("OnClick", function()
+        local v = (CL.GetSetting("announceCount") or 5) + 1
+        if v > 10 then v = 10 end
+        CL.SetSetting("announceCount", v)
+        RefreshOptionsWindow()
+    end)
+    f.announceCountStepper = announceCountStepper
+
+    local announcePullsLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    announcePullsLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    announcePullsLabel:SetText("Announce pulls (boss/elite only)")
+    local announcePullsCB = CreateFrame("CheckButton", "CombatLedgerAnnouncePullsCB", pageAdvanced, "UICheckButtonTemplate")
+    announcePullsCB:SetWidth(20)
+    announcePullsCB:SetHeight(20)
+    announcePullsCB:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 3)
+    announcePullsCB:SetScript("OnClick", function()
+        CL.SetSetting("announcePulls", (this:GetChecked() == 1))
+    end)
+    f.announcePullsCB = announcePullsCB
+
+    local testLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    testLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    testLabel:SetText("Test mode (fill with dummy data)")
+    local testCB = CreateFrame("CheckButton", "CombatLedgerTestModeCB", pageAdvanced, "UICheckButtonTemplate")
+    testCB:SetWidth(20)
+    testCB:SetHeight(20)
+    testCB:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 3)
+    testCB:SetScript("OnClick", function()
+        CL.testMode = (this:GetChecked() == 1)
+        CL.FireAppearanceChanged()
+    end)
+    f.testCB = testCB
+
+    -- Windows - "main" (this addon's original single window) always
+    -- exists and isn't listed here; extra windows are what "+ New
+    -- Window" creates, each an independent mode/segment/size/position
+    -- (see UI_MainWindow.lua's instance factory) so e.g. Healing can sit
+    -- in one window while Damage sits in another. Fixed-size row pool
+    -- (MAX_WINDOW_ROWS) like the rest of this window's fixed layout,
+    -- not a scroll list - refreshed from CL.UI.GetWindowList() below.
+    local windowsHeader = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    y = NextY()
+    windowsHeader:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    windowsHeader:SetText("|cffffd700Windows|r")
+
+    local newWindowBtn = CreateSmallButton(pageAdvanced, WINDOW_WIDTH - 28, "+ New Window")
+    y = NextY()
+    newWindowBtn:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    newWindowBtn:SetScript("OnClick", function()
+        if CL.UI and CL.UI.CreateExtraWindow then
+            CL.UI.CreateExtraWindow()
+            RefreshOptionsWindow()
+        end
+    end)
+    f.newWindowBtn = newWindowBtn
+
+    f.windowRows = {}
+    local wi
+    for wi = 1, MAX_WINDOW_ROWS do
+        y = NextY()
+        local row = CreateFrame("Frame", nil, pageAdvanced)
+        row:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+        row:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y)
+        row:SetHeight(18)
+
+        local rowLabel = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        rowLabel:SetPoint("LEFT", row, "LEFT", 0, 0)
+        rowLabel:SetPoint("RIGHT", row, "RIGHT", -20, 0)
+        rowLabel:SetJustifyH("LEFT")
+        row.rowLabel = rowLabel
+
+        local rowCloseBtn = CreateSmallButton(row, 16, "X")
+        rowCloseBtn:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+        row.rowCloseBtn = rowCloseBtn
+
+        f.windowRows[wi] = row
+    end
+
+    y = NextY() + 6
+    local resetPosBtn = CreateSmallButton(pageAdvanced, WINDOW_WIDTH - 28, "Reset Window Positions")
+    resetPosBtn:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    resetPosBtn:SetScript("OnClick", function()
+        CombatLedgerDB.layout = {}
+        CL.Print("Window positions reset - reopen each window (or /reload) to see it at its default spot.")
+    end)
+    f.resetPosBtn = resetPosBtn
+
+    ShowTab("general")
+
+    if pfUI and pfUI.api then
+        pcall(function()
+            pfUI.api.CreateBackdrop(f)
+            pfUI.api.CreateBackdropShadow(f)
+            pfUI.api.SkinCloseButton(closeBtn)
+            pfUI.api.SkinCheckbox(lockCB)
+            pfUI.api.SkinCheckbox(minimapCB)
+            pfUI.api.SkinCheckbox(showCombatCB)
+            pfUI.api.SkinCheckbox(hideCombatCB)
+            pfUI.api.SkinCheckbox(smoothCB)
+            pfUI.api.SkinCheckbox(testCB)
+            pfUI.api.SkinCheckbox(announcePullsCB)
+            if matchPfuiCB then pfUI.api.SkinCheckbox(matchPfuiCB) end
+            pfUI.api.SkinButton(textureBtn)
+            pfUI.api.SkinButton(fontBtn)
+            pfUI.api.SkinButton(numberFmtBtn)
+            pfUI.api.SkinButton(resetPosBtn)
+            pfUI.api.SkinButton(newWindowBtn)
+            pfUI.api.SkinButton(tabGeneralBtn)
+            pfUI.api.SkinButton(tabAdvancedBtn)
+            local wi
+            for wi = 1, table.getn(f.windowRows) do
+                pfUI.api.SkinButton(f.windowRows[wi].rowCloseBtn)
+            end
+            pfUI.api.SkinButton(fontSizeStepper.minus)
+            pfUI.api.SkinButton(fontSizeStepper.plus)
+            pfUI.api.SkinButton(barHeightStepper.minus)
+            pfUI.api.SkinButton(barHeightStepper.plus)
+            pfUI.api.SkinButton(opacityStepper.minus)
+            pfUI.api.SkinButton(opacityStepper.plus)
+            pfUI.api.SkinButton(speedStepper.minus)
+            pfUI.api.SkinButton(speedStepper.plus)
+            pfUI.api.SkinButton(announceChanBtn)
+            pfUI.api.SkinButton(announceCountStepper.minus)
+            pfUI.api.SkinButton(announceCountStepper.plus)
+        end)
+        f:SetBackdropBorderColor(themeR, themeG, themeB, 1)
+    end
+
+    CL.ApplyFontToTree(f)
+
+    window = f
+    return f
+end
+
+-- Walking the whole window is cheap and guarantees every label/title/
+-- checkbox/stepper in this window picks up a font change, without
+-- having to hand-instrument each one - see CL.ApplyFontToTree.
+CL.OnAppearanceChanged(function()
+    if window then CL.ApplyFontToTree(window) end
+end)
+
+RefreshOptionsWindow = function()
+    if not window then return end
+
+    window.lockCB:SetChecked(CL.GetSetting("lockWindow"))
+    window.minimapCB:SetChecked(CL.GetSetting("showMinimapButton") ~= false)
+    window.showCombatCB:SetChecked(CL.GetSetting("autoShowInCombat") ~= false)
+    window.hideCombatCB:SetChecked(CL.GetSetting("autoHideOutOfCombat"))
+    if window.matchPfuiCB then
+        window.matchPfuiCB:SetChecked(CL.IsMatchPfui())
+    end
+
+    window.textureBtn.label:SetText(LabelForKey(CL.GetAvailableBarTextures(), CL.GetSetting("barTexture") or "blizzard"))
+    window.fontBtn.label:SetText(LabelForKey(CL.FONTS, CL.GetSetting("fontKey") or "friz"))
+    window.fontSizeStepper.value:SetText(tostring(CL.GetSetting("fontSize") or 10))
+    local barHeight = CL.GetSetting("barHeight")
+    window.barHeightStepper.value:SetText(barHeight and tostring(barHeight) or "Default")
+    window.numberFmtBtn.label:SetText(LabelForKey(CL.NUMBER_FORMATS, CL.GetSetting("numberFormat") or "abbreviated"))
+    window.opacityStepper.value:SetText((CL.GetSetting("windowOpacityPct") or 85) .. "%")
+
+    local matchOn = CL.IsMatchPfui()
+    SetControlEnabled(window.textureBtn, not matchOn)
+    SetControlEnabled(window.fontBtn, not matchOn)
+    SetControlEnabled(window.fontSizeStepper, not matchOn)
+    SetControlEnabled(window.opacityStepper, not matchOn)
+
+    window.smoothCB:SetChecked(CL.IsSmoothBars())
+    window.speedStepper.value:SetText(tostring(CL.GetBarSpeed()))
+    SetControlEnabled(window.speedStepper, CL.IsSmoothBars())
+
+    window.announceChanBtn.label:SetText(LabelForKey(CL.ANNOUNCE_CHANNELS, CL.GetSetting("announceChannel") or "auto"))
+    window.announceCountStepper.value:SetText(tostring(CL.GetSetting("announceCount") or 5))
+    window.announcePullsCB:SetChecked(CL.GetSetting("announcePulls") ~= false)
+
+    window.testCB:SetChecked(CL.testMode)
+
+    if window.windowRows then
+        local list = (CL.UI and CL.UI.GetWindowList and CL.UI.GetWindowList()) or {}
+        local wi
+        for wi = 1, table.getn(window.windowRows) do
+            local row = window.windowRows[wi]
+            local entry = list[wi]
+            if entry then
+                row.rowLabel:SetText(entry.label .. (entry.closable and "" or " |cff888888(Main)|r"))
+                if entry.closable then
+                    row.rowCloseBtn:Show()
+                    local id = entry.id
+                    row.rowCloseBtn:SetScript("OnClick", function()
+                        if CL.UI and CL.UI.CloseExtraWindow then
+                            CL.UI.CloseExtraWindow(id)
+                            RefreshOptionsWindow()
+                        end
+                    end)
+                else
+                    row.rowCloseBtn:Hide()
+                end
+                row:Show()
+            else
+                row:Hide()
+            end
+        end
+    end
+end
+
+function OPT.Toggle()
+    if not window then CreateWindow() end
+    if window:IsShown() then
+        window:Hide()
+    else
+        RefreshOptionsWindow()
+        window:Show()
+    end
+end
+
+function OPT.Show()
+    if not window then CreateWindow() end
+    RefreshOptionsWindow()
+    window:Show()
+end
+
+--------------------------------------------------------------------------
+-- Minimap button - same draggable-icon pattern as LootLedger's own
+-- CreateMinimapButton. Left-click toggles the main meter; right-click
+-- opens Options.
+--------------------------------------------------------------------------
+
+local function CreateMinimapButton()
+    local btn = CreateFrame("Button", "CombatLedgerMinimapButton", Minimap)
+    btn:SetWidth(31)
+    btn:SetHeight(31)
+    btn:SetFrameStrata("MEDIUM")
+    btn:SetFrameLevel(8)
+    btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    btn:RegisterForDrag("LeftButton")
+    btn:SetMovable(true)
+
+    local overlay = btn:CreateTexture(nil, "OVERLAY")
+    overlay:SetWidth(53)
+    overlay:SetHeight(53)
+    overlay:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    overlay:SetPoint("TOPLEFT", 0, 0)
+
+    local icon = btn:CreateTexture(nil, "BACKGROUND")
+    icon:SetWidth(20)
+    icon:SetHeight(20)
+    icon:SetTexture("Interface\\Icons\\Ability_DualWield")
+    icon:SetPoint("TOPLEFT", 7, -6)
+    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+    local highlight = btn:CreateTexture(nil, "HIGHLIGHT")
+    highlight:SetWidth(20)
+    highlight:SetHeight(20)
+    highlight:SetPoint("TOPLEFT", 7, -6)
+    highlight:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+    highlight:SetBlendMode("ADD")
+
+    local function UpdatePosition(angle)
+        btn:ClearAllPoints()
+        btn:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * 80, math.sin(angle) * 80)
+    end
+    btn.UpdatePosition = UpdatePosition
+
+    -- This client restores the real CombatLedgerDB from disk AFTER this
+    -- file finishes executing (same timing quirk as CL.ApplyLayout - see
+    -- Core.lua), so a saved minimapAngle read right here would always
+    -- be nil - just place it at the default for now, OPT.RefreshMinimap
+    -- Position (called from Events.lua's first PLAYER_ENTERING_WORLD)
+    -- re-reads it once the real data actually exists.
+    UpdatePosition(3.93) -- ~225 deg, bottom-left
+
+    btn:SetScript("OnDragStart", function()
+        this:SetScript("OnUpdate", function()
+            local mx, my = Minimap:GetCenter()
+            local px, py = GetCursorPosition()
+            local scale = Minimap:GetEffectiveScale()
+            px, py = px / scale, py / scale
+            local angle = math.atan2(py - my, px - mx)
+            CombatLedgerDB.minimapAngle = angle
+            UpdatePosition(angle)
+        end)
+    end)
+    btn:SetScript("OnDragStop", function()
+        this:SetScript("OnUpdate", nil)
+    end)
+
+    btn:SetScript("OnClick", function()
+        if arg1 == "RightButton" then
+            OPT.Toggle()
+        elseif CL.UI then
+            CL.UI.Toggle()
+        end
+    end)
+
+    btn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(this, "ANCHOR_LEFT")
+        local r, g, b, hex = CL.GetThemeColor()
+        GameTooltip:SetText("|cff" .. hex .. "CombatLedger|r")
+        GameTooltip:AddLine("Click to toggle the meter", 1, 1, 1)
+        GameTooltip:AddLine("Right-click for Options", 1, 1, 1)
+        GameTooltip:AddLine("Drag to move this button", 0.7, 0.7, 0.7)
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+
+    return btn
+end
+
+function OPT.RefreshMinimapPosition()
+    if not minimapButton then return end
+    local angle = (CombatLedgerDB and CombatLedgerDB.minimapAngle) or 3.93
+    minimapButton.UpdatePosition(angle)
+end
+
+function OPT.RefreshMinimapVisibility()
+    if not minimapButton then return end
+    if CL.GetSetting("showMinimapButton") == false then
+        minimapButton:Hide()
+    else
+        minimapButton:Show()
+    end
+end
+
+minimapButton = CreateMinimapButton()

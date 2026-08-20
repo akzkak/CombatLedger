@@ -1,0 +1,526 @@
+--[[
+    Events - enables the Nampower CVars the combat events are gated
+    behind (default off), registers them, and dispatches into the
+    Aggregator. With CL.debug on, every raw event logs its full argument
+    list to CL.LOG_FILENAME (via CL.LogLine/FlushLog in Core.lua). Chat
+    stays quiet (just load/encounter start-stop) since real combat event
+    volume would make chat unreadable.
+]]
+
+local CL = CombatLedger
+
+local cvarsToEnable = {
+    "NP_EnableAutoAttackEvents",
+    "NP_EnableSpellStartEvents",
+    "NP_EnableSpellGoEvents",
+    "NP_EnableSpellHealEvents",
+    "NP_EnableSpellEnergizeEvents",
+    -- SPELL_DISPEL_BY_SELF/OTHER needs no CVar per Nampower's changelog.
+    -- AURA_CAST_ON_SELF/OTHER is needed for the debuffs-given correlation
+    -- (see HandleAuraCast/HandleDebuffAdded below). BUFF/DEBUFF_ADDED_*
+    -- need no CVar per Nampower's changelog.
+    "NP_EnableAuraCastEvents",
+}
+local function EnableCVars()
+    local i
+    for i = 1, table.getn(cvarsToEnable) do
+        pcall(SetCVar, cvarsToEnable[i], "1")
+    end
+end
+
+-- Best-effort spell name lookup for the breakdown UI - wrapped since
+-- GetSpellRecField's behavior isn't guaranteed for every spellId, and a
+-- failure here shouldn't break event handling.
+local function SpellName(spellId)
+    if not spellId or not GetSpellRecField then return nil end
+    local ok, name = pcall(GetSpellRecField, spellId, "name")
+    if ok then return name end
+    return nil
+end
+
+-- Nampower's *_OTHER events aren't scoped to your group - without this,
+-- a random unrelated player fighting a different mob nearby would get
+-- recorded as if they were part of the fight. Only record when at least
+-- one side is player/party/raid/pet (see GuidCache's roster tracking);
+-- the other side is free to be any mob/player, so "you hit a mob" and
+-- "a mob hits you" both pass, but "stranger hits unrelated mob" doesn't.
+local function IsRelevant(guidA, guidB)
+    if not CL.GuidCache then return false end
+    return CL.GuidCache.IsTracked(guidA) or CL.GuidCache.IsTracked(guidB)
+end
+
+local function HandleAutoAttack(isSelf, attackerGuid, targetGuid, totalDamage, hitInfo, victimState, componentCount, blocked, absorbed, resisted)
+    totalDamage = tonumber(totalDamage) or 0
+    hitInfo = tonumber(hitInfo)
+    local relevant = IsRelevant(attackerGuid, targetGuid)
+    if CL.debug then
+        CL.LogLine(string.format(
+            "%s[AUTO_ATTACK_%s] atk=%s tgt=%s dmg=%d hitInfo=%s victimState=%s comp=%s blocked=%s absorbed=%s resisted=%s",
+            relevant and "" or "[FILTERED] ", isSelf and "SELF" or "OTHER", tostring(attackerGuid), tostring(targetGuid), totalDamage,
+            tostring(hitInfo), tostring(victimState), tostring(componentCount),
+            tostring(blocked), tostring(absorbed), tostring(resisted)))
+    end
+    local isOffhand = CL.HasBit(hitInfo, CL.AUTO_ATTACK_HITFLAG_OFFHAND)
+    if relevant and totalDamage > 0 then
+        -- See Core.lua for bit meanings - glancing/crushing aren't
+        -- tracked as their own stat; only crit feeds into isCrit.
+        local isCrit = CL.HasBit(hitInfo, CL.AUTO_ATTACK_HITFLAG_CRIT)
+        CL.Aggregator.RecordDamage(attackerGuid, targetGuid, nil, nil, nil, totalDamage, isCrit, isOffhand)
+    elseif relevant and totalDamage == 0 then
+        -- dmg=0 auto-attacks are avoided swings (dodge/parry/miss/etc,
+        -- not "0 damage hits") - see Core.lua's VICTIMSTATE_* comment.
+        -- Off-hand misses carry the same 0x04 bit (hitInfo=20 = 0x14 =
+        -- miss|offhand).
+        CL.Aggregator.RecordAvoidance(attackerGuid, targetGuid, tonumber(victimState), isOffhand)
+    end
+end
+
+local function HandleSpellDamage(isSelf, targetGuid, casterGuid, spellId, amount, mitigation, hitInfo, school, effect)
+    amount = tonumber(amount) or 0
+    spellId = tonumber(spellId)
+    hitInfo = tonumber(hitInfo)
+    local name = SpellName(spellId)
+    local relevant = IsRelevant(casterGuid, targetGuid)
+    if CL.debug then
+        CL.LogLine(string.format(
+            "%s[SPELL_DAMAGE_EVENT_%s] tgt=%s caster=%s spell=%s(%s) dmg=%d mitigation=%s hitInfo=%s school=%s",
+            relevant and "" or "[FILTERED] ", isSelf and "SELF" or "OTHER", tostring(targetGuid), tostring(casterGuid),
+            tostring(name), tostring(spellId), amount, tostring(mitigation), tostring(hitInfo), tostring(school)))
+    end
+    if relevant and amount > 0 then
+        local isCrit = CL.HasBit(hitInfo, CL.SPELL_DAMAGE_HITFLAG_CRIT)
+        CL.Aggregator.RecordDamage(casterGuid, targetGuid, spellId, name, school, amount, isCrit)
+    end
+end
+
+local function HandleSpellHeal(targetGuid, casterGuid, spellId, amount, critFlag, periodicFlag)
+    amount = tonumber(amount) or 0
+    spellId = tonumber(spellId)
+    local name = SpellName(spellId)
+    local isCrit = (critFlag == "1" or critFlag == 1 or critFlag == true)
+    local relevant = IsRelevant(casterGuid, targetGuid)
+    if CL.debug then
+        CL.LogLine(string.format(
+            "%s[SPELL_HEAL] tgt=%s caster=%s spell=%s(%s) heal=%d crit=%s periodic=%s",
+            relevant and "" or "[FILTERED] ", tostring(targetGuid), tostring(casterGuid), tostring(name), tostring(spellId),
+            amount, tostring(critFlag), tostring(periodicFlag)))
+    end
+    if relevant and amount > 0 then
+        CL.Aggregator.RecordHealing(casterGuid, targetGuid, spellId, name, amount, 0, isCrit)
+    end
+end
+
+-- casterGuid, targetGuid, spellId - the spell that got dispelled, not
+-- the dispel spell itself (so the breakdown window's per-ability list
+-- shows "what did I cleanse", e.g. "Poison" x3, not just "Cleanse" x3).
+local function HandleSpellDispel(casterGuid, targetGuid, spellId)
+    spellId = tonumber(spellId)
+    local name = SpellName(spellId)
+    local relevant = IsRelevant(casterGuid, targetGuid)
+    if CL.debug then
+        CL.LogLine(string.format(
+            "%s[SPELL_DISPEL] caster=%s tgt=%s spell=%s(%s)",
+            relevant and "" or "[FILTERED] ", tostring(casterGuid), tostring(targetGuid), tostring(name), tostring(spellId)))
+    end
+    if relevant then
+        CL.Aggregator.RecordCleanse(casterGuid, targetGuid, spellId, name)
+    end
+end
+
+-- Debuffs given - two Nampower event families, each missing half of
+-- what's needed, that fire on consecutive lines for the same cast:
+--   AURA_CAST_ON_* - spellId, casterGuid, targetGuid, ... (caster, but
+--                     no reliable buff/debuff classification)
+--   DEBUFF_ADDED_* - guid, slot, spellId, ... (reliable classification -
+--                     this event only fires for debuffs - but no caster)
+-- AURA_CAST_ON_* stashes caster keyed by (targetGuid, spellId); the
+-- following DEBUFF_ADDED_* looks that key up to get both pieces at
+-- once. A single cast can fire AURA_CAST_ON_* more than once (multi-
+-- effect auras like shapeshifts), which just overwrites the same key
+-- harmlessly since the caster is identical each time.
+--
+-- BUFF_ADDED_* uses the same mechanism but is deliberately not wired to
+-- anything - "Buffs Given" doesn't fit this addon's per-encounter model,
+-- since prebuffing happens out of combat, before the encounter it's for
+-- even starts (see Aggregator.lua). Not registering BUFF_ADDED_* at all,
+-- so unmatched buff-side AURA_CAST entries just expire via the periodic
+-- pendingAuraCasts sweep below instead of ever being looked up.
+local pendingAuraCasts = {} -- key = targetGuid.."|"..spellId -> { casterGuid, time }
+local PENDING_AURA_WINDOW = 2 -- seconds - generous margin since the two events fire on adjacent lines for the same cast
+
+local function HandleAuraCast(spellId, casterGuid, targetGuid)
+    spellId = tonumber(spellId)
+    if not spellId or not targetGuid then return end
+    if CL.debug then
+        CL.LogLine(string.format("[AURA_CAST] caster=%s tgt=%s spell=%s(%s)",
+            tostring(casterGuid), tostring(targetGuid), tostring(SpellName(spellId)), tostring(spellId)))
+    end
+    -- Only worth stashing if this could ever be relevant later (the
+    -- target is what DEBUFF_ADDED_* will key off of, so caster
+    -- relevance is checked again at that point too, but there's no
+    -- reason to stash something neither side is tracked for).
+    if not IsRelevant(casterGuid, targetGuid) then return end
+    pendingAuraCasts[targetGuid .. "|" .. spellId] = { casterGuid = casterGuid, time = GetTime() }
+end
+
+local function HandleDebuffAdded(guid, spellId)
+    spellId = tonumber(spellId)
+    if not spellId or not guid then return end
+    local key = guid .. "|" .. spellId
+    local pending = pendingAuraCasts[key]
+    if CL.debug then
+        CL.LogLine(string.format("[AURA_ADDED] DEBUFF guid=%s spell=%s(%s) matched=%s",
+            tostring(guid), tostring(SpellName(spellId)), tostring(spellId), tostring(pending ~= nil)))
+    end
+    if not pending then return end
+    pendingAuraCasts[key] = nil
+    if (GetTime() - pending.time) > PENDING_AURA_WINDOW then return end
+    if not IsRelevant(pending.casterGuid, guid) then return end
+    CL.Aggregator.RecordDebuffGiven(pending.casterGuid, guid, spellId, SpellName(spellId))
+end
+
+-- SPELL_MISS/ENVIRONMENTAL_DMG/DAMAGE_SHIELD/SPELL_ENERGIZE exist in
+-- Nampower per its changelog, but their exact argument order isn't
+-- documented (unlike AUTO_ATTACK/SPELL_DAMAGE_EVENT/SPELL_HEAL). Log
+-- every raw arg instead of guessing at a Handle*-style signature -
+-- baking in a wrong interpretation would be worse than not parsing
+-- these at all.
+local function LogRawEvent(tag)
+    if not CL.debug then return end
+    CL.LogLine(string.format("[RAW %s] a1=%s a2=%s a3=%s a4=%s a5=%s a6=%s a7=%s a8=%s a9=%s",
+        tag, tostring(arg1), tostring(arg2), tostring(arg3), tostring(arg4),
+        tostring(arg5), tostring(arg6), tostring(arg7), tostring(arg8), tostring(arg9)))
+end
+
+local autoShownMainWindow = false -- see the PLAYER_ENTERING_WORLD handler below
+
+-- Some targets (training dummies, on at least this server) never toggle
+-- PLAYER_REGEN_DISABLED/ENABLED at all, so an encounter against one
+-- would otherwise never end. This is the fallback for that specific
+-- case: no combat event of any kind for CL.IDLE_SECONDS force-ends the
+-- encounter regardless of the regen flag. Everything else about when an
+-- encounter ends is regen state alone - PLAYER_REGEN_ENABLED below ends
+-- it immediately, no tolerance window. One continuous engagement (any
+-- number of mobs, chained or simultaneous) is one encounter as long as
+-- combat never actually drops; the moment it does, that encounter is
+-- over, full stop - the next PLAYER_REGEN_DISABLED always starts a new
+-- one, never resumes the old one.
+local lastEventTime = 0
+
+local function TouchActivity()
+    lastEventTime = GetTime()
+end
+
+local function FinishEncounter()
+    local finished = CL.Aggregator.EndEncounter()
+    if not finished then return end
+
+    -- Skip saving near-nothing encounters (a stray hit that barely
+    -- registered before the idle timeout) - not worth a history slot.
+    if finished.duration > 1 and CL.TableCount(finished.units) > 0 and CL.History then
+        CL.History.SaveEncounter(finished)
+    end
+
+    -- FinishEncounter also fires from the idle-timeout fallback (no
+    -- combat events for a while, not necessarily actually out of combat
+    -- - a slow-starting fight can trip this while regen is still
+    -- disabled). Only auto-hide when genuinely out of combat, or the
+    -- window can hide itself mid-fight with nothing left to re-show it
+    -- until the next real PLAYER_REGEN_DISABLED.
+    if CL.GetSetting("autoHideOutOfCombat") and CL.UI and not UnitAffectingCombat("player") then
+        CL.UI.Hide()
+    end
+
+    if CL.debug then
+        CL.Print(string.format("Encounter ended: %.1fs, %d unit(s) tracked.",
+            finished.duration, CL.TableCount(finished.units)))
+        CL.FlushLog()
+    end
+end
+
+local f = CreateFrame("Frame")
+
+f:SetScript("OnEvent", function()
+    if event == "PLAYER_ENTERING_WORLD" then
+        EnableCVars()
+        CL.GuidCache.Purge()
+        CL.GuidCache.RefreshRoster()
+        -- Deferred here (not called at UI_MainWindow.lua's file-load
+        -- time) so the saved size/position is actually there to restore
+        -- by the time the window shows - see that file's own comment.
+        -- Once per session only, not every zone/loading screen.
+        if not autoShownMainWindow then
+            autoShownMainWindow = true
+            -- Restore current/overall before the window's first Show()
+            -- so it renders with the real data immediately, not a blank
+            -- state that then jumps. If a live fight got restored,
+            -- treat "just reloaded" as activity so the normal idle
+            -- timeout can close it out shortly if nothing follows,
+            -- rather than it sitting there indefinitely un-timed-out.
+            CL.Aggregator.RestoreState(CombatLedgerDB.liveState)
+            if CL.Aggregator.GetCurrent() then
+                TouchActivity()
+            end
+            if CL.UI then
+                CL.UI.Show()
+                CL.UI.RestoreExtraWindows()
+            end
+            -- Same timing issue as UI.Show() above - the minimap button
+            -- is created at file-load time (before real SavedVariables
+            -- are restored), so its shown/hidden state has to be synced
+            -- here rather than decided at creation.
+            if CL.UIOptions then
+                CL.UIOptions.RefreshMinimapVisibility()
+                CL.UIOptions.RefreshMinimapPosition()
+            end
+        end
+        return
+    end
+
+    if event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" or event == "UNIT_PET" then
+        -- UNIT_PET covers summon/dismiss/death mid-session - roster
+        -- refresh on party/raid change alone misses a pet that appears
+        -- or disappears without the group composition itself changing.
+        CL.GuidCache.RefreshRoster()
+        return
+    end
+
+    if event == "PLAYER_LOGOUT" then
+        CL.FlushLog()
+        -- Also fires on /reload (not just a real logout) - without this,
+        -- the in-progress fight and the whole session's Overall totals
+        -- would be silently lost on every reload, since they only exist
+        -- as Lua locals otherwise. See Aggregator.lua's
+        -- SerializeState/RestoreState.
+        CombatLedgerDB.liveState = CL.Aggregator.SerializeState()
+        return
+    end
+
+    if event == "PLAYER_REGEN_DISABLED" then
+        TouchActivity()
+        CL.Aggregator.StartEncounter()
+        if CL.GetSetting("autoShowInCombat") ~= false and CL.UI then
+            CL.UI.Show()
+        end
+        return
+    end
+
+    if event == "PLAYER_REGEN_ENABLED" then
+        -- No tolerance window - combat dropping IS the end of the
+        -- encounter, immediately. One continuous engagement (any number
+        -- of mobs, chained or simultaneous) stays one encounter for as
+        -- long as regen never re-enables; the moment it does, this
+        -- encounter is over and the next PLAYER_REGEN_DISABLED always
+        -- starts a genuinely new one.
+        FinishEncounter()
+        return
+    end
+
+    if event == "AUTO_ATTACK_SELF" then
+        TouchActivity()
+        HandleAutoAttack(true, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+        return
+    end
+    if event == "AUTO_ATTACK_OTHER" then
+        TouchActivity()
+        HandleAutoAttack(false, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+        return
+    end
+
+    if event == "SPELL_DAMAGE_EVENT_SELF" then
+        TouchActivity()
+        HandleSpellDamage(true, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+        return
+    end
+    if event == "SPELL_DAMAGE_EVENT_OTHER" then
+        TouchActivity()
+        HandleSpellDamage(false, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+        return
+    end
+
+    if event == "SPELL_HEAL_BY_SELF" or event == "SPELL_HEAL_BY_OTHER" or event == "SPELL_HEAL_ON_SELF" then
+        TouchActivity()
+        HandleSpellHeal(arg1, arg2, arg3, arg4, arg5, arg6)
+        return
+    end
+
+    if event == "SPELL_MISS_SELF" or event == "SPELL_MISS_OTHER" then
+        TouchActivity()
+        LogRawEvent(event)
+        return
+    end
+
+    if event == "ENVIRONMENTAL_DMG_SELF" or event == "ENVIRONMENTAL_DMG_OTHER" then
+        TouchActivity()
+        LogRawEvent(event)
+        return
+    end
+
+    if event == "DAMAGE_SHIELD_SELF" or event == "DAMAGE_SHIELD_OTHER" then
+        TouchActivity()
+        LogRawEvent(event)
+        return
+    end
+
+    if event == "SPELL_ENERGIZE_BY_SELF" or event == "SPELL_ENERGIZE_BY_OTHER" or event == "SPELL_ENERGIZE_ON_SELF" then
+        LogRawEvent(event)
+        return
+    end
+
+    -- Shape: casterGuid, targetGuid, spellId - see HandleSpellDispel
+    -- above.
+    if event == "SPELL_DISPEL_BY_SELF" or event == "SPELL_DISPEL_BY_OTHER" then
+        TouchActivity()
+        HandleSpellDispel(arg1, arg2, arg3)
+        return
+    end
+
+    -- Debuffs given - see HandleAuraCast/HandleDebuffAdded above for the
+    -- correlation mechanism.
+    if event == "AURA_CAST_ON_SELF" or event == "AURA_CAST_ON_OTHER" then
+        HandleAuraCast(arg1, arg2, arg3)
+        return
+    end
+
+    if event == "DEBUFF_ADDED_SELF" or event == "DEBUFF_ADDED_OTHER" then
+        HandleDebuffAdded(arg1, arg3)
+        return
+    end
+
+    if event == "UNIT_DIED" then
+        if arg1 then
+            local attributed = CL.Aggregator.RecordDeath(arg1)
+            -- Auto-open only for the player's own death (a raid wipe would
+            -- otherwise fire this repeatedly, popping over itself) - other
+            -- tracked deaths still get a recap recorded, just not shown.
+            if attributed and CL.UIDeathRecap then
+                local ok, exists, playerGuid = pcall(UnitExists, "player")
+                if ok and exists and attributed == playerGuid then
+                    CL.UIDeathRecap.Show(attributed)
+                end
+            end
+        end
+        return
+    end
+end)
+
+-- Flushing the log buffer to disk on every single event would be a lot
+-- of file I/O during a real fight (see Core.lua's LogLine comment) - this
+-- throttles it to roughly once a second instead, using the same
+-- OnUpdate the grace-window end-of-encounter check already runs on.
+local flushAccum = 0
+f:SetScript("OnUpdate", function()
+    flushAccum = flushAccum + arg1
+    if flushAccum >= 1 then
+        flushAccum = 0
+        CL.FlushLog()
+        -- Same ~1s cadence: sweep any AURA_CAST that never got matched
+        -- to a DEBUFF_ADDED - includes every buff-side entry (BUFF_ADDED
+        -- isn't registered, see HandleAuraCast's comment) plus genuinely
+        -- unmatched debuffs (filtered target, edge case aura with no
+        -- slot event, ...) - so pendingAuraCasts doesn't grow unbounded
+        -- over a long session.
+        local key, pending
+        for key, pending in pairs(pendingAuraCasts) do
+            if (GetTime() - pending.time) > PENDING_AURA_WINDOW then
+                pendingAuraCasts[key] = nil
+            end
+        end
+    end
+
+    if CL.Aggregator.GetCurrent() and lastEventTime > 0 and (GetTime() - lastEventTime) > CL.IDLE_SECONDS then
+        FinishEncounter()
+    end
+end)
+
+f:RegisterEvent("PLAYER_ENTERING_WORLD")
+f:RegisterEvent("PLAYER_LOGOUT")
+f:RegisterEvent("PARTY_MEMBERS_CHANGED")
+f:RegisterEvent("RAID_ROSTER_UPDATE")
+f:RegisterEvent("UNIT_PET")
+f:RegisterEvent("PLAYER_REGEN_DISABLED")
+f:RegisterEvent("PLAYER_REGEN_ENABLED")
+f:RegisterEvent("AUTO_ATTACK_SELF")
+f:RegisterEvent("AUTO_ATTACK_OTHER")
+f:RegisterEvent("SPELL_DAMAGE_EVENT_SELF")
+f:RegisterEvent("SPELL_DAMAGE_EVENT_OTHER")
+f:RegisterEvent("SPELL_HEAL_BY_SELF")
+f:RegisterEvent("SPELL_HEAL_BY_OTHER")
+f:RegisterEvent("SPELL_HEAL_ON_SELF")
+f:RegisterEvent("SPELL_MISS_SELF")
+f:RegisterEvent("SPELL_MISS_OTHER")
+f:RegisterEvent("ENVIRONMENTAL_DMG_SELF")
+f:RegisterEvent("ENVIRONMENTAL_DMG_OTHER")
+f:RegisterEvent("DAMAGE_SHIELD_SELF")
+f:RegisterEvent("DAMAGE_SHIELD_OTHER")
+f:RegisterEvent("SPELL_ENERGIZE_BY_SELF")
+f:RegisterEvent("SPELL_ENERGIZE_BY_OTHER")
+f:RegisterEvent("SPELL_ENERGIZE_ON_SELF")
+f:RegisterEvent("SPELL_DISPEL_BY_SELF")
+f:RegisterEvent("SPELL_DISPEL_BY_OTHER")
+f:RegisterEvent("AURA_CAST_ON_SELF")
+f:RegisterEvent("AURA_CAST_ON_OTHER")
+f:RegisterEvent("DEBUFF_ADDED_SELF")
+f:RegisterEvent("DEBUFF_ADDED_OTHER")
+f:RegisterEvent("UNIT_DIED")
+
+-- /cl status walks current.units - table.getn doesn't work on a
+-- guid-keyed table, so it needs CL.TableCount too; simplest to keep the
+-- printed unit list here rather than exposing internals from Aggregator.
+local function PrintStatus()
+    local cur = CL.Aggregator.GetCurrent()
+    if not cur then
+        CL.Print("No live encounter.")
+        return
+    end
+    CL.Print(string.format("Live encounter: %.1fs elapsed, %d unit(s) tracked.",
+        GetTime() - cur.startTime, CL.TableCount(cur.units)))
+    local guid, u
+    for guid, u in pairs(cur.units) do
+        CL.Print(string.format("  %s - dmgDone=%d dmgTaken=%d healDone=%d deaths=%d",
+            tostring(u.name), u.damageDone.total, u.damageTaken.total, u.healingDone.total, u.deaths))
+    end
+end
+
+SLASH_COMBATLEDGER1 = "/cl"
+SlashCmdList["COMBATLEDGER"] = function(msg)
+    msg = string.lower(msg or "")
+    if msg == "debug" then
+        CL.debug = not CL.debug
+        CL.Print("Debug " .. (CL.debug and "ON" or "OFF"))
+    elseif msg == "status" then
+        PrintStatus()
+    elseif msg == "flush" then
+        if not WriteCustomFile then
+            CL.Print("WriteCustomFile isn't available on this Nampower build - can't write the debug log to file.")
+        else
+            CL.FlushLog()
+            CL.Print("Log flushed to " .. CL.LOG_FILENAME .. ".")
+        end
+    elseif msg == "show" then
+        if CL.UI then CL.UI.Show() end
+    elseif msg == "hide" then
+        if CL.UI then CL.UI.Hide() end
+    elseif msg == "toggle" or msg == "" then
+        if CL.UI then CL.UI.Toggle() end
+    elseif msg == "history" then
+        if CL.UIHistory then CL.UIHistory.Toggle() end
+    elseif msg == "options" or msg == "opt" then
+        if CL.UIOptions then CL.UIOptions.Toggle() end
+    elseif msg == "testdeath" then
+        -- Snapshots whatever's currently in your rolling hit-history
+        -- buffer and shows the recap, without touching the real death
+        -- counter - fight something for a few seconds then run this,
+        -- rather than actually dying to test the window.
+        local ok, exists, playerGuid = pcall(UnitExists, "player")
+        if ok and exists and playerGuid then
+            CL.Aggregator.SnapshotDeathRecap(playerGuid)
+            if CL.UIDeathRecap then CL.UIDeathRecap.Show(playerGuid) end
+        end
+    else
+        CL.Print("/cl toggle|show|hide - meter window. /cl options - lock/minimap/appearance settings. /cl history - saved encounters. /cl testdeath - preview the death recap without dying. /cl debug - toggle event logging. /cl status - live encounter totals. /cl flush - force-write the debug log now.")
+    end
+end
+
+EnableCVars()
+CL.Print("Loaded. /cl toggle to show the meter, /cl options for settings, /cl help for commands.")
