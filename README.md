@@ -5,20 +5,25 @@ A combat meter for 1.12 WoW, built on [Nampower](https://gitea.com/avitasia/namp
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="screenshots/main.png" width="420"><br>
+      <img src="screenshots/main.png" width="260"><br>
       <sub><b>Main window</b> — Damage Done</sub>
     </td>
     <td align="center" width="50%">
-      <img src="screenshots/options.png" width="420"><br>
+      <img src="screenshots/options.png" width="260"><br>
       <sub><b>Options</b></sub>
     </td>
   </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="screenshots/threat-multiwindow.png" width="260"><br>
+      <sub><b>Threat mode</b> alongside a second window, each independent</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="screenshots/breakdown.png" width="260"><br>
+      <sub>Click any bar for a full <b>per-ability, per-target breakdown</b></sub>
+    </td>
+  </tr>
 </table>
-
-<p align="center">
-  <img src="screenshots/threat-multiwindow.png" width="820"><br>
-  <sub><b>Threat mode</b> running alongside a second window, each independent</sub>
-</p>
 
 ## Why that matters
 
@@ -39,6 +44,8 @@ CombatLedger instead listens to Nampower's own combat events — `AUTO_ATTACK_SE
 - **Threat** — a live per-target threat display sourced from the server's own `UnitDetailedThreatSituation` addon-message API, including a "pull aggro at" reference line showing exactly how much more threat you can generate before you pull off the current target.
 
 Every mode has **Current Fight**, session-long **Overall**, and a scrollable **History** of past encounters, independently switchable per window. You can run as many meter windows as you want at once, each with its own mode, segment, size, and position — track Damage in one and Healing in another simultaneously.
+
+CombatLedger also announces **who pulled** a boss/elite encounter and with what ability, straight to chat — toggleable in Options.
 
 ## Requirements
 
