@@ -3,14 +3,10 @@
 A combat meter for 1.12 WoW, built on [Nampower](https://gitea.com/avitasia/nampower)'s structured combat events instead of parsing chat-log text.
 
 ![Main window](screenshots/main.png)
+![Threat mode and a second window running side by side](screenshots/threat-multiwindow.png)
 ![Options](screenshots/options.png)
 
-<!--
-More screenshots welcome here, e.g.:
-  screenshots/breakdown.png   - the per-ability/per-target breakdown window
-  screenshots/threat.png      - Threat mode, tank marker + pull aggro bar visible
-  screenshots/multiwindow.png - two+ windows open in different modes side by side
--->
+<!-- A breakdown-window screenshot would be a good addition here too. -->
 
 ## Why that matters
 
