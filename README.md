@@ -1,6 +1,6 @@
 # CombatLedger
 
-A combat meter for 1.12 WoW, built on [Nampower](https://gitea.com/avitasia/nampower)'s structured combat events instead of parsing chat-log text.
+A combat meter for 1.12 WoW, built on [Nampower](https://github.com/namreeb/nampower)'s structured combat events instead of parsing chat-log text.
 
 <table>
   <tr>
@@ -49,7 +49,7 @@ CombatLedger also announces **who pulled** a boss/elite encounter and with what 
 
 ## Requirements
 
-- **[Nampower](https://gitea.com/avitasia/nampower)** — required. This is the client hook layer CombatLedger's entire event pipeline is built on; without it, none of the combat events used here exist.
+- **[Nampower](https://github.com/namreeb/nampower)** — required. This is the client hook layer CombatLedger's entire event pipeline is built on; without it, none of the combat events used here exist.
 - **[pfUI](https://github.com/shagu/pfUI)** — optional. If installed, CombatLedger can mirror pfUI's bar texture, font, and window skin so it matches the rest of your UI.
 
 ## Installation
@@ -63,3 +63,13 @@ Drop the `CombatLedger` folder into your `Interface/AddOns` directory, alongside
 - `/cl history` — the saved-encounters list.
 - Click any bar to open its per-ability, per-target breakdown.
 - Right-click the minimap icon (or the meter window's Options button) for everything else.
+
+## Roadmap
+
+Not built yet, in no particular order:
+
+- **Encounter Breakdown Tool** — turn the History list into a real per-encounter report (full bars, per-ability/per-target breakdowns) instead of just a list of names to click into.
+- **Encounter Comparison Tool** — line up two saved encounters against each other (say, the same boss on two different pulls) to see what actually changed.
+- **Interrupts** — melee interrupts (Kick, Pummel) already have a real signal available from Nampower; pure spell-cast interrupts (Counterspell, Spell Lock) don't have a confirmed one yet.
+- **CC / CC Breaks** — crowd control applied, and broken early, likely on the same debuff-correlation pipeline Debuffs Given already uses.
+- **Raid Prebuff Inspector** — a live check of which raid buffs each party/raid member is actually missing, based on class/spec. A different model from everything else here, since it needs to work before combat starts rather than per-encounter.
