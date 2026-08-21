@@ -41,6 +41,10 @@ local function NewEncounter()
         label = nil,
         zone = (GetRealZoneText and GetRealZoneText()) or "",
         startTime = GetTime(),
+        -- Wall-clock companion to startTime, used only by RestoreState's
+        -- staleness check below - see that comment for why GetTime()
+        -- alone isn't safe there.
+        startTimeReal = time(),
         units = {},
         activeDuration = 0, -- only meaningful for `overall` (see GetOverallDuration) - sum of finished encounters' durations, so idle time between pulls doesn't dilute Overall DPS
         pullBy = nil, -- { name, label } - set once, from whoever's action started this encounter
@@ -253,18 +257,30 @@ local function StartEncounter()
     end
 end
 
--- Guards every Record* function's lazy "if not current then
--- StartEncounter()" below - without this, a stray post-combat event
--- (a HoT finishing its last tick, a top-off heal, a mana-regen tick
--- from resting/drinking) spins up a brand new encounter out of thin
--- air the moment the real fight's encounter has already ended, purely
--- because something still called Record* after current went nil. That
--- phantom encounter then just sits there with near-zero real data
--- until the idle timeout eventually kills it, showing up in History as
--- an empty "fight" nobody actually had. Checking player-or-group
--- combat state first means a stray heal tick with nobody actually
--- fighting anything just doesn't get recorded into a new encounter at
--- all - correct, since it isn't part of a fight.
+-- Guards RecordHealing/RecordCleanse's lazy "if not current then
+-- StartEncounter()" - without this, a stray post-combat event (a HoT
+-- finishing its last tick, a top-off heal, a mana-regen tick from
+-- resting/drinking) spins up a brand new encounter out of thin air the
+-- moment the real fight's encounter has already ended, purely because
+-- something still called Record* after current went nil. That phantom
+-- encounter then just sits there with near-zero real data until the
+-- idle timeout eventually kills it, showing up in History as an empty
+-- "fight" nobody actually had.
+--
+-- Deliberately NOT applied to RecordDamage/RecordAvoidance/
+-- RecordInterrupt/RecordDebuffGiven - those only ever happen as part of
+-- actually engaging a hostile target, so they're unambiguous proof of
+-- combat on their own and don't need UnitAffectingCombat to confirm it.
+-- PLAYER_REGEN_DISABLED/UnitAffectingCombat flipping true isn't
+-- guaranteed to happen before the first damage event of a fresh pull
+-- lands, so gating damage on it would risk dropping that first hit -
+-- kept unconditional here defensively, even though the actual missed-
+-- first-hit bug users hit (both here and in ShaguDPS, so it's not
+-- specific to this guard) turned out to be upstream of this addon
+-- entirely - see the PLAYER_ENTERING_WORLD/reload comment in Events.lua.
+-- Healing/Cleanses don't have that same first-hit urgency and DO
+-- legitimately happen with nobody fighting anything, so they keep the
+-- check.
 local function AnyoneInCombat()
     local okP, playerCombat = pcall(UnitAffectingCombat, "player")
     if okP and playerCombat then return true end
@@ -354,19 +370,40 @@ local function SerializeState()
 end
 
 -- `current`'s startTime is a GetTime() value from the PREVIOUS process -
--- valid across a same-process /reload (GetTime() keeps counting), but
--- not across a real logout/relogin (GetTime() resets to ~0 on a fresh
--- client launch, which would make a restored fight look like it started
--- in the future). Only restores current as still-live when that's
--- plausible; overall doesn't have this problem (activeDuration is just
--- an accumulated number, not a GetTime()-relative one).
+-- valid across a same-process /reload (GetTime() keeps counting, since
+-- /reload only rebuilds the Lua environment, not the game client
+-- process), but not across a real logout/relogin (GetTime() resets to
+-- ~0 on a fresh client launch). The original check here was
+-- "startTime <= GetTime()", meant to reject a startTime that would
+-- otherwise land in the future - but that's not actually a same-process
+-- test: a fresh launch's GetTime() ALSO starts small, so an old
+-- encounter that itself started early in ITS session (small startTime)
+-- can trivially satisfy "<= GetTime()" again on a brand new process
+-- once even a few seconds have ticked since login, and get wrongly
+-- restored as still-live. That silently absorbed the real session's
+-- first hit into the stale encounter (which the idle timeout then
+-- finishes/discards before the real pull even starts) - reported as
+-- "the first hit of a new session doesn't get recorded", easy to hit
+-- while testing this exact behavior (attack once, relaunch to check,
+-- repeat - each of those old sessions has a small startTime by
+-- construction). startTimeReal (time(), wall-clock) doesn't have this
+-- problem - it never resets across any boundary, reload or relaunch -
+-- so "was this saved within the last few minutes" is a real same-
+-- process test instead of a coincidental number comparison. Missing
+-- startTimeReal (older saved data, before this field existed) is
+-- treated as stale/reject, same as the original conservative default.
+-- overall doesn't have this problem (activeDuration is just an
+-- accumulated number, not a GetTime()-relative one).
+local RESTORE_STALE_SECONDS = 300
 local function RestoreState(saved)
     if not saved then return end
     if saved.overall then
         overall = saved.overall
         BackfillEncounter(overall)
     end
-    if saved.current and saved.current.startTime and saved.current.startTime <= GetTime() then
+    if saved.current and saved.current.startTimeReal
+        and (time() - saved.current.startTimeReal) < RESTORE_STALE_SECONDS
+        and saved.current.startTime and saved.current.startTime <= GetTime() then
         current = saved.current
         BackfillEncounter(current)
     end
@@ -524,10 +561,7 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
 end
 
 local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
-    if not current then
-        if not AnyoneInCombat() then return end
-        StartEncounter()
-    end
+    if not current then StartEncounter() end
 
     -- Pull attribution: whoever's action is the first damage event
     -- against/from a boss-tagged enemy this encounter "pulled" it - set
@@ -633,10 +667,7 @@ end
 -- routed through RecordDamage since amount is always 0 here; still
 -- writes into both current and overall like every other Record* call.
 local function RecordAvoidance(casterGuid, targetGuid, victimState, isOffhand)
-    if not current then
-        if not AnyoneInCombat() then return end
-        StartEncounter()
-    end
+    if not current then StartEncounter() end
     local key = VICTIMSTATE_KEY[victimState] or "other"
     RecordAvoidanceInto(current.units, casterGuid, targetGuid, key, isOffhand)
     RecordAvoidanceInto(overall.units, casterGuid, targetGuid, key, isOffhand)
@@ -716,19 +747,13 @@ local function RecordCleanse(casterGuid, targetGuid, spellId, spellName)
 end
 
 local function RecordDebuffGiven(casterGuid, targetGuid, spellId, spellName)
-    if not current then
-        if not AnyoneInCombat() then return end
-        StartEncounter()
-    end
+    if not current then StartEncounter() end
     RecordCountEventInto(current.units, "debuffsGiven", casterGuid, targetGuid, spellId, spellName)
     RecordCountEventInto(overall.units, "debuffsGiven", casterGuid, targetGuid, spellId, spellName)
 end
 
 local function RecordInterrupt(casterGuid, targetGuid, spellId, spellName)
-    if not current then
-        if not AnyoneInCombat() then return end
-        StartEncounter()
-    end
+    if not current then StartEncounter() end
     RecordCountEventInto(current.units, "interrupts", casterGuid, targetGuid, spellId, spellName)
     RecordCountEventInto(overall.units, "interrupts", casterGuid, targetGuid, spellId, spellName)
 end

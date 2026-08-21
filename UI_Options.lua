@@ -707,7 +707,10 @@ local function CreateMinimapButton()
     local icon = btn:CreateTexture(nil, "BACKGROUND")
     icon:SetWidth(20)
     icon:SetHeight(20)
-    icon:SetTexture("Interface\\Icons\\Ability_DualWield")
+    -- Was Ability_DualWield - collided with this server's preinstalled
+    -- BG Finder addon using the exact same icon, making the two
+    -- indistinguishable on the minimap. A book fits "Ledger" anyway.
+    icon:SetTexture("Interface\\Icons\\INV_Misc_Book_09")
     icon:SetPoint("TOPLEFT", 7, -6)
     icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
