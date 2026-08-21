@@ -200,28 +200,23 @@ local autoShownMainWindow = false -- see the PLAYER_ENTERING_WORLD handler below
 -- case: no combat event of any kind for CL.IDLE_SECONDS force-ends the
 -- encounter regardless of the regen flag. Everything else about when an
 -- encounter ends is regen state alone - PLAYER_REGEN_ENABLED below ends
--- it immediately, no tolerance window. One continuous engagement (any
--- number of mobs, chained or simultaneous) is one encounter as long as
--- combat never actually drops; the moment it does, that encounter is
--- over, full stop - the next PLAYER_REGEN_DISABLED always starts a new
--- one, never resumes the old one.
+-- it immediately, always, no tolerance window, no group check. One
+-- continuous engagement (any number of mobs, chained or simultaneous)
+-- is one encounter as long as combat never actually drops; the moment
+-- it does, that encounter is over, full stop - the next
+-- PLAYER_REGEN_DISABLED always starts a new one, never resumes the old
+-- one.
 --
--- Two earlier attempts at raid-specific tolerance (a flat grace window
--- after regen-enabled, then a group-combat-state check with a debounce
--- timer) both made things worse - reverted, then debug logging was
--- added instead of guessing again. That logging caught a real instance:
--- at the moment PLAYER_REGEN_ENABLED fired for the player, 4 other raid
--- members were still UnitAffectingCombat()-true. Confirms the raid was
--- genuinely still fighting - the player's own regen flag just isn't
--- representative of the raid's combat state. Fix: when regen clears
--- while grouped, don't finish immediately - wait for
--- AnyGroupMemberInCombat() to actually go false, checked every tick, no
--- fixed grace/debounce duration anywhere. The instant it's false,
--- finish on that same tick. If nobody else is in combat right away (solo,
--- or a raid that's genuinely done), this is identical to the old
--- immediate-finish behavior.
+-- A group-wait (defer finishing until every raid/party member's own
+-- combat flag also clears) used to live here, added after debug
+-- logging caught a real instance of the player's own regen clearing
+-- while 4 raid members were still UnitAffectingCombat()-true. Removed
+-- again - GreedMeter (this addon's own reference point) has no such
+-- check at all and reportedly never fragments a pull in months of real
+-- use, so the theoretical risk isn't worth the stop feeling delayed on
+-- every single fight to guard against an edge case that doesn't
+-- actually bite in practice.
 local lastEventTime = 0
-local pendingGroupFinish = false
 
 -- Checks whether anyone else in the group is still flagged in combat.
 -- On this client, GetNumPartyMembers() has been observed nonzero AT THE
@@ -374,7 +369,6 @@ f:SetScript("OnEvent", function()
 
     if event == "PLAYER_REGEN_DISABLED" then
         LogRegenDiagnostic("DISABLED")
-        pendingGroupFinish = false
         TouchActivity()
         CL.Aggregator.StartEncounter()
         if CL.UI and CL.UI.ApplyAutoShow then
@@ -385,19 +379,7 @@ f:SetScript("OnEvent", function()
 
     if event == "PLAYER_REGEN_ENABLED" then
         LogRegenDiagnostic("ENABLED")
-        local grouped = ((GetNumRaidMembers and GetNumRaidMembers()) or 0) > 0
-            or ((GetNumPartyMembers and GetNumPartyMembers()) or 0) > 0
-        if grouped and AnyGroupMemberInCombat() then
-            -- Someone else is still fighting - don't finish yet, the
-            -- OnUpdate ticker below finishes the instant that's no
-            -- longer true. Solo (not grouped) always finishes right here,
-            -- same as before.
-            pendingGroupFinish = true
-            if CL.debug then CL.LogLine("[REGEN] deferring finish - other member(s) still in combat") end
-        else
-            if CL.debug then CL.LogLine("[REGEN] finishing immediately - grouped=" .. tostring(grouped) .. " (nobody else in combat, or solo)") end
-            FinishEncounter()
-        end
+        FinishEncounter()
         return
     end
 
@@ -496,12 +478,6 @@ end)
 local flushAccum = 0
 local idleSuppressedLogged = false
 f:SetScript("OnUpdate", function()
-    if pendingGroupFinish and not AnyGroupMemberInCombat() then
-        pendingGroupFinish = false
-        if CL.debug then CL.LogLine("[REGEN] deferred finish now firing - group combat cleared") end
-        FinishEncounter()
-    end
-
     flushAccum = flushAccum + arg1
     if flushAccum >= 1 then
         flushAccum = 0

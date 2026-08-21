@@ -257,30 +257,29 @@ local function StartEncounter()
     end
 end
 
--- Guards RecordHealing/RecordCleanse's lazy "if not current then
--- StartEncounter()" - without this, a stray post-combat event (a HoT
--- finishing its last tick, a top-off heal, a mana-regen tick from
--- resting/drinking) spins up a brand new encounter out of thin air the
--- moment the real fight's encounter has already ended, purely because
--- something still called Record* after current went nil. That phantom
--- encounter then just sits there with near-zero real data until the
--- idle timeout eventually kills it, showing up in History as an empty
--- "fight" nobody actually had.
+-- Guards every Record*'s lazy "if not current then StartEncounter()" -
+-- without this, a stray post-combat event (a HoT finishing its last
+-- tick, a top-off heal, a DoT's last tick landing late, splash damage
+-- from something already resolved) spins up a brand new BLANK encounter
+-- out of thin air the moment the real fight's encounter has already
+-- ended, purely because something still called Record* after current
+-- went nil. Since UI_MainWindow.lua's "Current Fight" display prefers
+-- current over the frozen lastFinished the instant current exists again
+-- (see GetCurrentDisplay below), that phantom encounter doesn't just
+-- sit there quietly - it immediately overwrites the just-finished
+-- fight's summary with an empty one, which is exactly what looked like
+-- "the stop isn't instant" (the fight really did end fine; a trailing
+-- event just erased the result a moment later).
 --
--- Deliberately NOT applied to RecordDamage/RecordAvoidance/
--- RecordInterrupt/RecordDebuffGiven - those only ever happen as part of
--- actually engaging a hostile target, so they're unambiguous proof of
--- combat on their own and don't need UnitAffectingCombat to confirm it.
--- PLAYER_REGEN_DISABLED/UnitAffectingCombat flipping true isn't
--- guaranteed to happen before the first damage event of a fresh pull
--- lands, so gating damage on it would risk dropping that first hit -
--- kept unconditional here defensively, even though the actual missed-
--- first-hit bug users hit (both here and in ShaguDPS, so it's not
--- specific to this guard) turned out to be upstream of this addon
--- entirely - see the PLAYER_ENTERING_WORLD/reload comment in Events.lua.
--- Healing/Cleanses don't have that same first-hit urgency and DO
--- legitimately happen with nobody fighting anything, so they keep the
--- check.
+-- Used to be skipped for RecordDamage/RecordAvoidance/RecordInterrupt/
+-- RecordDebuffGiven specifically, on the theory that gating on combat
+-- risked dropping the first hit of a fresh pull if UnitAffectingCombat
+-- hadn't flipped true yet. That theory never actually panned out - the
+-- real missed-first-hit bug those functions were protecting against
+-- turned out to be upstream of this addon entirely (see the
+-- PLAYER_ENTERING_WORLD/reload comment in Events.lua) - so the
+-- defensive exemption was just leaving this hole open for no real
+-- benefit. All Record* functions use the same guard now.
 local function AnyoneInCombat()
     local okP, playerCombat = pcall(UnitAffectingCombat, "player")
     if okP and playerCombat then return true end
@@ -561,7 +560,10 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
 end
 
 local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
-    if not current then StartEncounter() end
+    if not current then
+        if not AnyoneInCombat() then return end
+        StartEncounter()
+    end
 
     -- Pull attribution: whoever's action is the first damage event
     -- against/from a boss-tagged enemy this encounter "pulled" it - set
@@ -667,7 +669,10 @@ end
 -- routed through RecordDamage since amount is always 0 here; still
 -- writes into both current and overall like every other Record* call.
 local function RecordAvoidance(casterGuid, targetGuid, victimState, isOffhand)
-    if not current then StartEncounter() end
+    if not current then
+        if not AnyoneInCombat() then return end
+        StartEncounter()
+    end
     local key = VICTIMSTATE_KEY[victimState] or "other"
     RecordAvoidanceInto(current.units, casterGuid, targetGuid, key, isOffhand)
     RecordAvoidanceInto(overall.units, casterGuid, targetGuid, key, isOffhand)
@@ -747,13 +752,19 @@ local function RecordCleanse(casterGuid, targetGuid, spellId, spellName)
 end
 
 local function RecordDebuffGiven(casterGuid, targetGuid, spellId, spellName)
-    if not current then StartEncounter() end
+    if not current then
+        if not AnyoneInCombat() then return end
+        StartEncounter()
+    end
     RecordCountEventInto(current.units, "debuffsGiven", casterGuid, targetGuid, spellId, spellName)
     RecordCountEventInto(overall.units, "debuffsGiven", casterGuid, targetGuid, spellId, spellName)
 end
 
 local function RecordInterrupt(casterGuid, targetGuid, spellId, spellName)
-    if not current then StartEncounter() end
+    if not current then
+        if not AnyoneInCombat() then return end
+        StartEncounter()
+    end
     RecordCountEventInto(current.units, "interrupts", casterGuid, targetGuid, spellId, spellName)
     RecordCountEventInto(overall.units, "interrupts", casterGuid, targetGuid, spellId, spellName)
 end

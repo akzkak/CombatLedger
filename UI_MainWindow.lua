@@ -1197,7 +1197,20 @@ RefreshInstance = function(inst)
             if pct > 1 then pct = 1 end
             if entry.isAgroMarker then pct = 1 end -- always full-width, a reference line not a real total
             bar.targetPct = pct
-            if not CL.IsSmoothBars() then
+            -- Smoothing looks nice mid-fight (bars glide instead of
+            -- jumping every refresh tick), but that same glide is what
+            -- made the STOP itself feel laggy - the encounter's data
+            -- finalizes instantly (see Aggregator.lua's FinishEncounter/
+            -- EndEncounter), yet the bar could still take up to ~1s to
+            -- visually catch up to its true final length. Snap straight
+            -- to the target instead of animating whenever there's no
+            -- live encounter actually running (i.e. Current Fight is
+            -- showing the frozen last-finished result, not a fight in
+            -- progress) - the glide only applies while something's
+            -- actually still live to glide toward.
+            local shouldSnap = not CL.IsSmoothBars()
+                or (not isThreat and window.segment == "current" and not CL.Aggregator.GetCurrent())
+            if shouldSnap then
                 bar:SetValue(pct)
             end
             if entry.isAgroMarker then
