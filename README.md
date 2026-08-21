@@ -75,4 +75,10 @@ Not built yet, in no particular order:
 
 ## Credits
 
-The default "Flat" bar texture (`img/bar.tga`) is [pfUI](https://github.com/shagu/pfUI)'s own bar texture by Eric Mauser (Shagu), bundled here so that look is available without requiring pfUI itself — used under pfUI's MIT license.
+The default appearance is styled after [pfUI](https://github.com/shagu/pfUI) by Eric Mauser (Shagu). Bundled directly from it, under pfUI's MIT license, so all of this is available without requiring pfUI itself:
+
+- Bar textures (`img/bar.tga` plus the ElvUI/Gradient/Striped/TukUI alternates)
+- The soft window shadow (`img/glow2.tga`)
+- The Expressway font (`fonts/Expressway.ttf`)
+
+The window/button border and background colors are a flat near-black matching pfUI's own minimal style.

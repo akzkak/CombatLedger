@@ -55,7 +55,7 @@ CL.defaultSettings = {
     showMinimapButton = true,
     announceChannel = "auto", -- "auto" (raid > party > say) / "say" / "party" / "raid" / "guild"
     announceCount = 5,
-    windowOpacityPct = 85, -- background alpha, as a percent - ignored while matchPfui is on
+    windowOpacityPct = 81, -- background alpha, as a percent - ignored while matchPfui is on (81 matches the flat skin's pfUI-derived look)
     autoShowInCombat = true,
     autoHideOutOfCombat = false,
     announcePulls = true, -- "Pull: X (spell)" chat print at the start of a boss/elite encounter - see Aggregator.lua's RecordDamage
@@ -205,34 +205,36 @@ end
 -- actually installed - this used to be exclusive to pfUI users via
 -- "Match pfUI", which only helps if you already run pfUI. It's the
 -- default (see CL.defaultSettings) - Blizzard/Smooth Gradient are still
--- here for anyone who wants the classic look back. The remaining pfUI_*
--- entries stay pfUI-sourced (elvui/gradient/striped/tukui skins aren't
--- bundled, only pfUI's default) - `pfui` is the pfUI.media key (see
--- pfUI.lua's img: path resolution) for those.
+-- here for anyone who wants the classic look back.
+--
+-- Previously also listed four "pfui_*" entries (elvui/gradient/striped/
+-- tukui) pointing at pfUI.media["img:bar_elvui"] etc. - removed, because
+-- those keys don't exist. Checked pfUI's actual source: every single
+-- pfUI file that skins a status bar reads pfUI.media["img:bar"] only -
+-- that's pfUI's ONE currently-selected bar texture (whatever the user
+-- picked in pfUI's own settings), not five separately-registered skin
+-- variants. Those four entries always resolved to nil, so cycling onto
+-- any of them called SetStatusBarTexture(nil), which silently no-ops
+-- and leaves whatever texture was already showing - this is what "bar
+-- texture doesn't change" turned out to be.
+--
+-- Fixed for real by bundling the actual .tga files (img/bar_elvui.tga
+-- etc, MIT-licensed from pfUI - see README) directly, same as
+-- img/bar.tga - these are genuinely pfUI's own alternate bar skins, just
+-- shipped as this addon's own assets instead of a broken lookup into
+-- pfUI's media table.
 CL.BAR_TEXTURES = {
     { key = "flat", label = "Flat (default)" },
     { key = "blizzard", label = "Blizzard Default" },
     { key = "raid", label = "Smooth Gradient" },
-    { key = "pfui_elvui", label = "ElvUI Style", pfui = "img:bar_elvui" },
-    { key = "pfui_gradient", label = "pfUI Gradient", pfui = "img:bar_gradient" },
-    { key = "pfui_striped", label = "Striped", pfui = "img:bar_striped" },
-    { key = "pfui_tukui", label = "TukUI Style", pfui = "img:bar_tukui" },
+    { key = "elvui", label = "ElvUI Style", file = "bar_elvui" },
+    { key = "gradient", label = "pfUI Gradient", file = "bar_gradient" },
+    { key = "striped", label = "Striped", file = "bar_striped" },
+    { key = "tukui", label = "TukUI Style", file = "bar_tukui" },
 }
 
--- Filters out the pfUI-sourced entries when pfUI isn't installed (those
--- files live inside pfUI's own addon folder) - safe to call any time
--- after full addon load, which every caller of this does (Options only
--- opens well after that).
 function CL.GetAvailableBarTextures()
-    if CL.HasPfui() then return CL.BAR_TEXTURES end
-    local list = {}
-    local i
-    for i = 1, table.getn(CL.BAR_TEXTURES) do
-        if not CL.BAR_TEXTURES[i].pfui then
-            table.insert(list, CL.BAR_TEXTURES[i])
-        end
-    end
-    return list
+    return CL.BAR_TEXTURES
 end
 
 function CL.GetBarTexture()
@@ -250,8 +252,8 @@ function CL.GetBarTexture()
         local i
         for i = 1, table.getn(CL.BAR_TEXTURES) do
             local t = CL.BAR_TEXTURES[i]
-            if t.key == key and t.pfui and CL.HasPfui() and pfUI.media then
-                return pfUI.media[t.pfui]
+            if t.key == key and t.file then
+                return "Interface\\AddOns\\CombatLedger\\img\\" .. t.file
             end
         end
     end
@@ -266,6 +268,9 @@ CL.FONTS = {
     { key = "arial", label = "Arial Narrow", path = "Fonts\\ARIALN.TTF" },
     { key = "skurri", label = "Skurri", path = "Fonts\\SKURRI.TTF" },
     { key = "morpheus", label = "Morpheus", path = "Fonts\\MORPHEUS.ttf" },
+    -- Not a stock client font - bundled from pfUI (fonts/Expressway.ttf,
+    -- MIT-licensed, see README), same reasoning as img/bar.tga.
+    { key = "expressway", label = "Expressway", path = "Interface\\AddOns\\CombatLedger\\fonts\\Expressway.ttf" },
 }
 
 function CL.GetFontPath()
@@ -343,7 +348,7 @@ end
 -- otherwise, so this would have no visible effect and Options greys the
 -- control out).
 function CL.GetWindowOpacity()
-    return (CL.GetSetting("windowOpacityPct") or 85) / 100
+    return (CL.GetSetting("windowOpacityPct") or 81) / 100
 end
 
 -- `fallback` is a window's own original backdrop alpha, used while
@@ -354,12 +359,37 @@ function CL.GetBackdropAlpha(fallback)
     return CL.GetWindowOpacity()
 end
 
+-- Flat WHITE8X8 panel, matching pfUI's own default (non-"thin",
+-- non-blizzard-forced) window backdrop exactly - same texture for both
+-- background and edge (tinted separately via SetBackdropColor/
+-- BackdropBorderColor), 1px edge, background inset -1px past the edge
+-- so there's no gap between them. This used to be Blizzard's rounded
+-- Tooltip border, a completely different look from pfUI's minimal
+-- style - see CL.ApplyWindowSkin below for why that mattered.
 CL.WINDOW_BACKDROP = {
-    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true, tileSize = 16, edgeSize = 16,
-    insets = { left = 4, right = 4, top = 4, bottom = 4 },
+    bgFile = "Interface\\BUTTONS\\WHITE8X8", tile = false, tileSize = 0,
+    edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 1,
+    insets = { left = -1, right = -1, top = -1, bottom = -1 },
 }
+
+-- Soft drop shadow, matching pfUI's own backdrop_shadow - img/glow2.tga
+-- is pfUI's actual shadow texture, bundled here the same way img/bar.tga
+-- is (MIT-licensed, see README). 5px larger than the frame on every
+-- side, same as pfUI's own anchor offsets.
+CL.WINDOW_SHADOW = {
+    edgeFile = "Interface\\AddOns\\CombatLedger\\img\\glow2", edgeSize = 8,
+    insets = { left = 0, right = 0, top = 0, bottom = 0 },
+}
+
+-- Near-black border/background - not a guess, this is one real pfUI
+-- user's own actual tweaked appearance settings (border.color/
+-- background from their pfUI SavedVariables), used here as the new
+-- manual-skin default so the look doesn't require pfUI at all. Applies
+-- everywhere the manual (non-"Match pfUI") skin renders a border -
+-- window and buttons alike - rather than this addon's own theme/class
+-- color, matching "Match pfUI"'s own existing rule that only text stays
+-- class-colored, not chrome.
+CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B = 0.059, 0.059, 0.059
 
 -- Applies pfUI's own skin to a window's backdrop when "Match pfUI" is on
 -- (and pfUI is loaded), otherwise (re)applies this addon's own plain
@@ -406,7 +436,29 @@ function CL.ApplyWindowSkin(f, borderR, borderG, borderB, opacityFallback)
     if CL.GetSetting("hideBorder") then
         f:SetBackdropBorderColor(0, 0, 0, 0)
     else
-        f:SetBackdropBorderColor(borderR, borderG, borderB, 1)
+        f:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)
+    end
+
+    -- Own shadow frame for the manual skin, same idea as pfUI's
+    -- backdrop_shadow child - created once, just re-shown/re-hidden
+    -- after that (same pattern as pfUI's f.backdrop above).
+    if not CL.GetSetting("hideBorder") then
+        if not f.flatShadow then
+            f.flatShadow = CreateFrame("Frame", nil, f)
+            -- BACKGROUND strata (same as pfUI's own backdrop_shadow) so
+            -- it reliably sits behind f regardless of frame level -
+            -- more robust than same-strata level math, which can lose
+            -- to sibling frames at the same level.
+            f.flatShadow:SetFrameStrata("BACKGROUND")
+            f.flatShadow:SetFrameLevel(1)
+            f.flatShadow:SetPoint("TOPLEFT", f, "TOPLEFT", -5, 5)
+            f.flatShadow:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 5, -5)
+            f.flatShadow:SetBackdrop(CL.WINDOW_SHADOW)
+        end
+        f.flatShadow:SetBackdropBorderColor(0, 0, 0, 0.35)
+        f.flatShadow:Show()
+    elseif f.flatShadow then
+        f.flatShadow:Hide()
     end
 end
 
@@ -422,12 +474,18 @@ end
 -- highlight is left enabled (SetButtonTooltip's own border-highlight
 -- self-disables via CL.IsMatchPfui() so the two don't fight over the
 -- same border on hover).
+--
+-- The manual-skin branch below ignores the passed-in borderR/G/B (kept
+-- in the signature since every call site still passes theme color, used
+-- elsewhere) in favor of the same near-black FLAT_BORDER_* used on the
+-- window itself - consistent flat look, not theme-colored chrome mixed
+-- with a neutral window border.
 function CL.ApplyButtonSkin(btn, borderR, borderG, borderB)
     if CL.IsMatchPfui() and pfUI.api then
         local ok = pcall(pfUI.api.SkinButton, btn)
         if ok then return end
     end
-    btn:SetBackdropBorderColor(borderR, borderG, borderB, 1)
+    btn:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)
 end
 
 function CL.IsSmoothBars()
