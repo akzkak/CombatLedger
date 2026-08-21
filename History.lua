@@ -8,6 +8,11 @@
     EnsureSettingsTable for the same issue with .settings), so a cached
     table reference risks writing into an orphaned copy that never
     actually gets saved.
+
+    encounter.series (Aggregator's bucketed damage/healing/taken-per-2s
+    timeline) is real content, not scratch data like mobTally/mobHealth -
+    it's kept through the save so UI_EncounterReport can graph a saved
+    encounter, not just the live one.
 ]]
 
 local CL = CombatLedger

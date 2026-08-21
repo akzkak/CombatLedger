@@ -205,7 +205,48 @@ local autoShownMainWindow = false -- see the PLAYER_ENTERING_WORLD handler below
 -- combat never actually drops; the moment it does, that encounter is
 -- over, full stop - the next PLAYER_REGEN_DISABLED always starts a new
 -- one, never resumes the old one.
+--
+-- Two earlier attempts at raid-specific tolerance (a flat grace window
+-- after regen-enabled, then a group-combat-state check with a debounce
+-- timer) both made things worse - reverted, then debug logging was
+-- added instead of guessing again. That logging caught a real instance:
+-- at the moment PLAYER_REGEN_ENABLED fired for the player, 4 other raid
+-- members were still UnitAffectingCombat()-true. Confirms the raid was
+-- genuinely still fighting - the player's own regen flag just isn't
+-- representative of the raid's combat state. Fix: when regen clears
+-- while grouped, don't finish immediately - wait for
+-- AnyGroupMemberInCombat() to actually go false, checked every tick, no
+-- fixed grace/debounce duration anywhere. The instant it's false,
+-- finish on that same tick. If nobody else is in combat right away (solo,
+-- or a raid that's genuinely done), this is identical to the old
+-- immediate-finish behavior.
 local lastEventTime = 0
+local pendingGroupFinish = false
+
+-- Checks whether anyone else in the group is still flagged in combat.
+-- On this client, GetNumPartyMembers() has been observed nonzero AT THE
+-- SAME TIME as GetNumRaidMembers() while genuinely in a raid (a real
+-- quirk, seen in the diagnostic log) - so this checks BOTH ranges
+-- whenever they're nonzero rather than assuming they're mutually
+-- exclusive, to avoid missing raid members if partyN is stale.
+local function AnyGroupMemberInCombat()
+    local raidN = (GetNumRaidMembers and GetNumRaidMembers()) or 0
+    local partyN = (GetNumPartyMembers and GetNumPartyMembers()) or 0
+    local i
+    if raidN > 0 then
+        for i = 1, raidN do
+            local ok, inCombat = pcall(UnitAffectingCombat, "raid" .. i)
+            if ok and inCombat then return true end
+        end
+    end
+    if partyN > 0 then
+        for i = 1, partyN do
+            local ok, inCombat = pcall(UnitAffectingCombat, "party" .. i)
+            if ok and inCombat then return true end
+        end
+    end
+    return false
+end
 
 local function TouchActivity()
     lastEventTime = GetTime()
@@ -234,8 +275,38 @@ local function FinishEncounter()
     if CL.debug then
         CL.Print(string.format("Encounter ended: %.1fs, %d unit(s) tracked.",
             finished.duration, CL.TableCount(finished.units)))
+        CL.LogLine(string.format("[REGEN] FinishEncounter: %.1fs, %d unit(s) tracked.",
+            finished.duration, CL.TableCount(finished.units)))
         CL.FlushLog()
     end
+end
+
+-- Debug-only diagnostic for both regen events, ahead of whatever fix
+-- comes next - logs enough to actually see the real event timeline
+-- (with /cl debug on) instead of guessing at one again. Counts raid/
+-- party members currently showing UnitAffectingCombat so it's possible
+-- to tell, after the fact, whether the group was genuinely still
+-- fighting when regen cleared for the player.
+local function LogRegenDiagnostic(evt)
+    if not CL.debug then return end
+    local okP, playerCombat = pcall(UnitAffectingCombat, "player")
+    local raidN = (GetNumRaidMembers and GetNumRaidMembers()) or 0
+    local partyN = (GetNumPartyMembers and GetNumPartyMembers()) or 0
+    local othersInCombat = 0
+    local i
+    if raidN > 0 then
+        for i = 1, raidN do
+            local ok, inCombat = pcall(UnitAffectingCombat, "raid" .. i)
+            if ok and inCombat then othersInCombat = othersInCombat + 1 end
+        end
+    elseif partyN > 0 then
+        for i = 1, partyN do
+            local ok, inCombat = pcall(UnitAffectingCombat, "party" .. i)
+            if ok and inCombat then othersInCombat = othersInCombat + 1 end
+        end
+    end
+    CL.LogLine(string.format("[REGEN] %s t=%.1f playerCombat=%s raidN=%d partyN=%d membersInCombat=%d",
+        evt, GetTime(), tostring(okP and playerCombat), raidN, partyN, othersInCombat))
 end
 
 local f = CreateFrame("Frame")
@@ -297,6 +368,8 @@ f:SetScript("OnEvent", function()
     end
 
     if event == "PLAYER_REGEN_DISABLED" then
+        LogRegenDiagnostic("DISABLED")
+        pendingGroupFinish = false
         TouchActivity()
         CL.Aggregator.StartEncounter()
         if CL.GetSetting("autoShowInCombat") ~= false and CL.UI then
@@ -306,13 +379,20 @@ f:SetScript("OnEvent", function()
     end
 
     if event == "PLAYER_REGEN_ENABLED" then
-        -- No tolerance window - combat dropping IS the end of the
-        -- encounter, immediately. One continuous engagement (any number
-        -- of mobs, chained or simultaneous) stays one encounter for as
-        -- long as regen never re-enables; the moment it does, this
-        -- encounter is over and the next PLAYER_REGEN_DISABLED always
-        -- starts a genuinely new one.
-        FinishEncounter()
+        LogRegenDiagnostic("ENABLED")
+        local grouped = ((GetNumRaidMembers and GetNumRaidMembers()) or 0) > 0
+            or ((GetNumPartyMembers and GetNumPartyMembers()) or 0) > 0
+        if grouped and AnyGroupMemberInCombat() then
+            -- Someone else is still fighting - don't finish yet, the
+            -- OnUpdate ticker below finishes the instant that's no
+            -- longer true. Solo (not grouped) always finishes right here,
+            -- same as before.
+            pendingGroupFinish = true
+            if CL.debug then CL.LogLine("[REGEN] deferring finish - other member(s) still in combat") end
+        else
+            if CL.debug then CL.LogLine("[REGEN] finishing immediately - grouped=" .. tostring(grouped) .. " (nobody else in combat, or solo)") end
+            FinishEncounter()
+        end
         return
     end
 
@@ -407,9 +487,15 @@ end)
 -- Flushing the log buffer to disk on every single event would be a lot
 -- of file I/O during a real fight (see Core.lua's LogLine comment) - this
 -- throttles it to roughly once a second instead, using the same
--- OnUpdate the grace-window end-of-encounter check already runs on.
+-- OnUpdate the end-of-encounter checks below already run on.
 local flushAccum = 0
 f:SetScript("OnUpdate", function()
+    if pendingGroupFinish and not AnyGroupMemberInCombat() then
+        pendingGroupFinish = false
+        if CL.debug then CL.LogLine("[REGEN] deferred finish now firing - group combat cleared") end
+        FinishEncounter()
+    end
+
     flushAccum = flushAccum + arg1
     if flushAccum >= 1 then
         flushAccum = 0
@@ -505,6 +591,13 @@ SlashCmdList["COMBATLEDGER"] = function(msg)
         if CL.UI then CL.UI.Toggle() end
     elseif msg == "history" then
         if CL.UIHistory then CL.UIHistory.Toggle() end
+    elseif msg == "report" then
+        local enc = CL.Aggregator.GetCurrentDisplay()
+        if enc and CL.UIEncounterReport then
+            CL.UIEncounterReport.Show(enc)
+        else
+            CL.Print("No current or recent encounter to report on yet.")
+        end
     elseif msg == "options" or msg == "opt" then
         if CL.UIOptions then CL.UIOptions.Toggle() end
     elseif msg == "testdeath" then
@@ -518,7 +611,7 @@ SlashCmdList["COMBATLEDGER"] = function(msg)
             if CL.UIDeathRecap then CL.UIDeathRecap.Show(playerGuid) end
         end
     else
-        CL.Print("/cl toggle|show|hide - meter window. /cl options - lock/minimap/appearance settings. /cl history - saved encounters. /cl testdeath - preview the death recap without dying. /cl debug - toggle event logging. /cl status - live encounter totals. /cl flush - force-write the debug log now.")
+        CL.Print("/cl toggle|show|hide - meter window. /cl options - lock/minimap/appearance settings. /cl history - saved encounters. /cl report - graph + leaderboard for the current/last fight. /cl testdeath - preview the death recap without dying. /cl debug - toggle event logging. /cl status - live encounter totals. /cl flush - force-write the debug log now.")
     end
 end
 

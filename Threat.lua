@@ -32,6 +32,16 @@ local current = {}
 local tankGuid = nil
 local lastUpdate = 0
 
+-- Set the moment the target changes, cleared the moment a fresh reply
+-- lands. While set, the OLD target's bars are left showing rather than
+-- snap-clearing to empty and popping back in half a second later - a
+-- clean swap in place reads a lot better than a flash-to-blank. Only
+-- if nothing comes back within STALE_TARGET_TIMEOUT do we give up and
+-- actually clear, so bars for a target that stopped replying (dead,
+-- out of range) don't linger forever.
+local pendingTargetSince = nil
+local STALE_TARGET_TIMEOUT = 2
+
 local function AddRosterName(unit)
     local ok, exists, guid = pcall(UnitExists, unit)
     if ok and exists and guid then
@@ -125,6 +135,7 @@ local function HandleThreatPacket(body)
     current = newCurrent
     tankGuid = newTank
     lastUpdate = GetTime()
+    pendingTargetSince = nil
 
     if CL.UI and CL.UI.RefreshMode then CL.UI.RefreshMode("threat") end
 end
@@ -185,15 +196,25 @@ f:SetScript("OnUpdate", function()
     end
 
     -- Target changed since the last poll (tab-targeting a different
-    -- mob, retargeting after a kill, etc) - the old snapshot belongs to
-    -- whatever was targeted before and isn't valid for the new one, so
-    -- clear immediately rather than leaving it showing indefinitely if
-    -- the new target never replies.
+    -- mob, retargeting after a kill, etc). The old snapshot technically
+    -- belongs to whatever was targeted before, but leaving it showing
+    -- until the new target's first reply lands (see pendingTargetSince
+    -- above) reads far better than snap-clearing to empty and having
+    -- bars pop back in ~0.5s later.
     if targetGuid ~= lastTargetGuid then
         if CL.debug then
             CL.LogLine("[Threat] target changed: " .. tostring(lastTargetGuid) .. " -> " .. tostring(targetGuid))
         end
         lastTargetGuid = targetGuid
+        pendingTargetSince = GetTime()
+    end
+
+    -- New target never replied (dead before the packet came back, out
+    -- of threat range, not a real mob, ...) - give up holding the old
+    -- bars and actually clear.
+    if pendingTargetSince and (GetTime() - pendingTargetSince) > STALE_TARGET_TIMEOUT then
+        pendingTargetSince = nil
+        if CL.debug then CL.LogLine("[Threat] pending target never replied - clearing") end
         current = {}
         tankGuid = nil
         if CL.UI and CL.UI.RefreshMode then CL.UI.RefreshMode("threat") end
@@ -216,6 +237,7 @@ f:SetScript("OnUpdate", function()
         -- Target/combat state dropped since the last poll - clear
         -- rather than leave a stale snapshot from whatever was
         -- last being fought showing in Threat mode indefinitely.
+        pendingTargetSince = nil
         current = {}
         tankGuid = nil
         if CL.UI and CL.UI.RefreshMode then CL.UI.RefreshMode("threat") end

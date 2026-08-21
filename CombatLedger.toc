@@ -16,4 +16,5 @@ UI_MainWindow.lua
 UI_BreakdownWindow.lua
 UI_DeathRecap.lua
 UI_HistoryWindow.lua
+UI_EncounterReport.lua
 UI_Options.lua

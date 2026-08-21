@@ -46,7 +46,36 @@ local function NewEncounter()
         pullBy = nil, -- { name, label } - set once, from whoever's action started this encounter
         mobTally = {}, -- [guid] = damage dealt to it by tracked casters - label-only, not a real bar entry (mobs are deliberately excluded from units)
         mobHealth = {}, -- [guid] = highest UnitHealthMax(guid) sampled for it - label-only, same reasoning as mobTally (see History.lua's ComputeLabel)
+        -- Raid-wide shape-of-the-fight, for UI_EncounterReport's graph.
+        -- Fixed-width time buckets (see RecordSeriesPoint), not a raw
+        -- per-event log: a whole fight's worth of events at ~2500 events/
+        -- encounter x up to 50 saved encounters would make
+        -- CombatLedgerDB.lua noticeably bloat and slow to parse on
+        -- login, where a bucketed series stays a few hundred small
+        -- tables even for a long fight. The cost is that the report
+        -- can't scrub to "what exactly landed at 1:23" the way a full
+        -- event log could - only the live DeathRecap buffer keeps that
+        -- level of per-event detail, and only for the last 10s per unit.
+        series = {},
     }
+end
+
+-- One shared bucket width for every encounter's series - only current
+-- (not overall) ever gets buckets recorded into it, since Overall isn't
+-- a single bounded fight and graphing "since login" wouldn't mean much.
+local TIMELINE_BUCKET_SECONDS = 2
+
+local function RecordSeriesPoint(enc, kind, amount)
+    if not enc or not enc.startTime or not enc.series then return end
+    local elapsed = GetTime() - enc.startTime
+    local idx = math.floor(elapsed / TIMELINE_BUCKET_SECONDS) + 1
+    if idx < 1 then idx = 1 end
+    local bucket = enc.series[idx]
+    if not bucket then
+        bucket = { damage = 0, healing = 0, taken = 0 }
+        enc.series[idx] = bucket
+    end
+    bucket[kind] = (bucket[kind] or 0) + amount
 end
 
 local overall = NewEncounter() -- long-lived; only cleared by ResetOverall()
@@ -270,6 +299,7 @@ local function BackfillEncounter(enc)
     -- moment RecordDamage's health sampler touched it.
     if not enc.mobTally then enc.mobTally = {} end
     if not enc.mobHealth then enc.mobHealth = {} end
+    if not enc.series then enc.series = {} end
     if not enc.units then return end
     local guid, u
     for guid, u in pairs(enc.units) do
@@ -476,6 +506,13 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
     RecordDamageInto(current.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
     RecordDamageInto(overall.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
 
+    if casterGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
+        RecordSeriesPoint(current, "damage", amount)
+    end
+    if targetGuid and IsTrackedGuid(AttributedGuid(targetGuid)) then
+        RecordSeriesPoint(current, "taken", amount)
+    end
+
     -- Tally damage dealt to whatever's NOT a roster member - i.e. the
     -- mob(s) actually being fought - purely so History.lua can label a
     -- saved encounter by the toughest thing in the pull. Mobs otherwise
@@ -590,6 +627,10 @@ local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount,
     if not current then StartEncounter() end
     RecordHealingInto(current.units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
     RecordHealingInto(overall.units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
+
+    if casterGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
+        RecordSeriesPoint(current, "healing", amount)
+    end
 end
 
 -- Shared by Cleanses/Buffs Given/Debuffs Given - all three are "how many
@@ -827,6 +868,7 @@ local function ClearTestEncounter()
 end
 
 CL.Aggregator = {
+    SERIES_BUCKET_SECONDS = TIMELINE_BUCKET_SECONDS,
     StartEncounter = StartEncounter,
     EndEncounter = EndEncounter,
     GetCurrent = GetCurrent,

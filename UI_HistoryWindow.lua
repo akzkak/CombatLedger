@@ -50,7 +50,7 @@ local function CreateRow(parent, index)
 
     local labelText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     labelText:SetPoint("TOPLEFT", row, "TOPLEFT", 6, -4)
-    labelText:SetPoint("TOPRIGHT", row, "TOPRIGHT", -22, -4)
+    labelText:SetPoint("TOPRIGHT", row, "TOPRIGHT", -52, -4)
     labelText:SetJustifyH("LEFT")
     CL.ApplyFont(labelText, CL.GetFontSize())
     row.labelText = labelText
@@ -84,6 +84,39 @@ local function CreateRow(parent, index)
     end)
     deleteBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     row.deleteBtn = deleteBtn
+
+    local reportBtn = CreateFrame("Button", nil, row)
+    reportBtn:EnableMouse(true)
+    reportBtn:RegisterForClicks("LeftButtonUp")
+    reportBtn:SetWidth(28)
+    reportBtn:SetHeight(16)
+    reportBtn:SetPoint("TOPRIGHT", row, "TOPRIGHT", -21, -3)
+    reportBtn:SetFrameLevel(row:GetFrameLevel() + 1)
+    reportBtn:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 8, edgeSize = 8,
+        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+    })
+    reportBtn:SetBackdropColor(0.12, 0.12, 0.12, 0.8)
+    local reportLabel = reportBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    reportLabel:SetAllPoints(reportBtn)
+    reportLabel:SetJustifyH("CENTER")
+    reportLabel:SetText("Rpt")
+    CL.ApplyFont(reportLabel)
+    reportBtn.label = reportLabel
+    reportBtn:SetScript("OnClick", function()
+        if row.encounterEntry and CL.UIEncounterReport then
+            CL.UIEncounterReport.Show(row.encounterEntry)
+        end
+    end)
+    reportBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(reportBtn, "ANCHOR_LEFT")
+        GameTooltip:SetText("Encounter Report")
+        GameTooltip:Show()
+    end)
+    reportBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    row.reportBtn = reportBtn
 
     row:SetScript("OnClick", function()
         if row.encounterEntry and CL.UI and CL.UI.ShowHistoryEncounter then
@@ -305,6 +338,7 @@ local function RestyleRows()
     for i = 1, table.getn(rows) do
         CL.ApplyFont(rows[i].labelText, CL.GetFontSize())
         CL.ApplyFont(rows[i].subText, CL.GetFontSize())
+        CL.ApplyFont(rows[i].reportBtn.label, CL.GetFontSize())
     end
 end
 CL.OnAppearanceChanged(RestyleRows)
