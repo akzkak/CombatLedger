@@ -354,6 +354,28 @@ function CL.GetBarHeight(default)
     return CL.GetSetting("barHeight") or default
 end
 
+-- Vanilla's full strata order, lowest to highest. Used by
+-- CL.NextLowerStrata below - a plain BACKGROUND constant for "one level
+-- behind whatever window this is attached to" only worked back when
+-- every CombatLedger window sat somewhere in the MEDIUM/DIALOG middle
+-- of this list, where BACKGROUND really was several levels below all
+-- of them. Once the main window moved to TOOLTIP (the top), a
+-- BACKGROUND-strata shadow left a huge gap - literally every other
+-- strata in between - for any other addon's frame to render on top of
+-- it, instead of the shadow staying visually attached to its own
+-- window like it does for everything else.
+CL.STRATA_ORDER = { "BACKGROUND", "LOW", "MEDIUM", "HIGH", "DIALOG", "FULLSCREEN", "FULLSCREEN_DIALOG", "TOOLTIP" }
+
+function CL.NextLowerStrata(strata)
+    local i
+    for i = 1, table.getn(CL.STRATA_ORDER) do
+        if CL.STRATA_ORDER[i] == strata then
+            return CL.STRATA_ORDER[math.max(1, i - 1)]
+        end
+    end
+    return "BACKGROUND" -- unrecognized input - safest fallback
+end
+
 -- Background alpha for every window's backdrop - only applied while
 -- "Match pfUI" is off (pfUI's own skin governs backdrop appearance
 -- otherwise, so this would have no visible effect and Options greys the
@@ -456,11 +478,13 @@ function CL.ApplyWindowSkin(f, borderR, borderG, borderB, opacityFallback)
     if not CL.GetSetting("hideBorder") then
         if not f.flatShadow then
             f.flatShadow = CreateFrame("Frame", nil, f)
-            -- BACKGROUND strata (same as pfUI's own backdrop_shadow) so
-            -- it reliably sits behind f regardless of frame level -
-            -- more robust than same-strata level math, which can lose
-            -- to sibling frames at the same level.
-            f.flatShadow:SetFrameStrata("BACKGROUND")
+            -- One strata below f's own (not a flat BACKGROUND constant -
+            -- see CL.NextLowerStrata's comment for why) so it reliably
+            -- sits just behind its own window regardless of frame level,
+            -- without leaving a gap other addons' frames can render into
+            -- when f itself is high up the strata order (e.g. the main
+            -- meter window at TOOLTIP).
+            f.flatShadow:SetFrameStrata(CL.NextLowerStrata(f:GetFrameStrata()))
             f.flatShadow:SetFrameLevel(1)
             f.flatShadow:SetPoint("TOPLEFT", f, "TOPLEFT", -5, 5)
             f.flatShadow:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 5, -5)
@@ -519,14 +543,26 @@ function CL.ShowDropdown(anchor, options)
     if not dropdownCatcher then
         dropdownCatcher = CreateFrame("Button", nil, UIParent)
         dropdownCatcher:SetAllPoints(UIParent)
-        dropdownCatcher:SetFrameStrata("FULLSCREEN")
+        -- TOOLTIP - same as the main meter window (its highest possible
+        -- caller). A submenu has to be able to render above whatever
+        -- opened it; FULLSCREEN was fine back when nothing this addon
+        -- created went above FULLSCREEN_DIALOG, but the main window
+        -- moving to TOOLTIP left this (and the dropdown itself, below)
+        -- rendering underneath it instead of on top like a menu should.
+        dropdownCatcher:SetFrameStrata("TOOLTIP")
+        dropdownCatcher:SetFrameLevel(1)
         dropdownCatcher:EnableMouse(true)
         dropdownCatcher:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         dropdownCatcher:SetScript("OnClick", CL.CloseDropdown)
     end
     if not dropdownFrame then
         dropdownFrame = CreateFrame("Frame", nil, UIParent)
-        dropdownFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+        -- Same TOOLTIP strata as the catcher, but a higher frame level -
+        -- same-strata stacking order is decided by frame level, and the
+        -- actual clickable rows need to win that against the full-screen
+        -- catcher sitting right underneath them.
+        dropdownFrame:SetFrameStrata("TOOLTIP")
+        dropdownFrame:SetFrameLevel(2)
         dropdownFrame:SetBackdrop(CL.WINDOW_BACKDROP)
         dropdownFrame:SetBackdropColor(0.05, 0.05, 0.05, 0.97)
         dropdownFrame:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)

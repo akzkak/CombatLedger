@@ -80,5 +80,6 @@ The default appearance is styled after [pfUI](https://github.com/shagu/pfUI) by 
 - Bar textures (`img/bar.tga` plus the ElvUI/Gradient/Striped/TukUI alternates - resized square from pfUI's originals, since this client only loads square status bar textures)
 - The soft window shadow (`img/glow2.tga`)
 - The Expressway font (`fonts/Expressway.ttf`)
+- The class icon set (`img/classicons.tga`) - Blizzard's own stock class icon atlas doesn't render on this client at all (not just a square-dimension issue - it's square and still doesn't work), so this uses pfUI's own bundled replacement instead
 
 The window/button border and background colors are a flat near-black matching pfUI's own minimal style. "Smooth Gradient" (`img/bar_smooth.tga`) is this addon's own generated texture, not from pfUI - Blizzard's own gradient bar texture doesn't load on this client either (same square-only limitation).

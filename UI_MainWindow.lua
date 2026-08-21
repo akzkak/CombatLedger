@@ -444,7 +444,15 @@ local function CreateBar(inst, parent, index)
     classIcon:SetWidth(height - 4)
     classIcon:SetHeight(height - 4)
     classIcon:SetPoint("LEFT", bar, "LEFT", 3, 0)
-    classIcon:SetTexture("Interface\\TargetingFrame\\UI-Classes-Circle")
+    -- Not the stock Interface\TargetingFrame\UI-Classes-Circle atlas -
+    -- confirmed (via /cl debug) that texture shows nothing on this
+    -- client despite loading and rendering without error, same "non-
+    -- square textures silently fail" class of issue as CL.GetBarTexture
+    -- earlier, except this stock one apparently fails regardless of its
+    -- real dimensions. Using pfUI's own bundled classicons.tga instead
+    -- (256x256, confirmed square, MIT-licensed - see README) - same
+    -- CLASS_ICON_TCOORDS layout, just a different, working file.
+    classIcon:SetTexture("Interface\\AddOns\\CombatLedger\\img\\classicons")
     classIcon:Hide()
     bar.classIcon = classIcon
 
@@ -545,7 +553,8 @@ local function RestyleAll()
             CL.ApplyFont(window.announceBtn.label)
             CL.ApplyFont(window.segBtn.label)
             CL.ApplyFont(window.modeBtn.label)
-            CL.RepositionBarPool(inst.bars, CL.GetBarHeight(BAR_HEIGHT), BAR_GAP)
+            local newBarHeight = CL.GetBarHeight(BAR_HEIGHT)
+            CL.RepositionBarPool(inst.bars, newBarHeight, BAR_GAP)
             local i
             for i = 1, table.getn(inst.bars) do
                 local bar = inst.bars[i]
@@ -553,15 +562,20 @@ local function RestyleAll()
                 bar.bg:SetTexture(CL.GetBarTexture())
                 CL.ApplyFont(bar.nameText, CL.GetFontSize())
                 CL.ApplyFont(bar.valueText, CL.GetFontSize())
+                -- Class icon was sized once at bar creation from
+                -- whatever the bar height was then - never followed a
+                -- later "Bar size" change, so it stayed a fixed size
+                -- while the bar around it grew/shrank.
+                bar.classIcon:SetWidth(newBarHeight - 4)
+                bar.classIcon:SetHeight(newBarHeight - 4)
             end
             RefreshInstance(inst)
         end
     end
-    if dropdownFrame then
-        for i = 1, table.getn(dropdownFrame.rows) do
-            CL.ApplyFont(dropdownFrame.rows[i].text)
-        end
-    end
+    -- Dropdown row fonts aren't refreshed here - CL.ShowDropdown (Core.lua)
+    -- already re-applies CL.ApplyFont to every row's text each time it
+    -- opens, so there's nothing stale to catch up on a pure appearance
+    -- change while it's closed.
 end
 CL.OnAppearanceChanged(RestyleAll)
 
@@ -711,7 +725,17 @@ local function CreateWindowFrame(inst)
     local themeR, themeG, themeB, themeHex = CL.GetThemeColor()
     f:SetBackdropColor(0, 0, 0, CL.GetBackdropAlpha(0.8))
     f:SetBackdropBorderColor(themeR, themeG, themeB, 1)
-    f:SetFrameStrata("TOOLTIP") -- highest strata - a live meter shouldn't be able to end up hidden behind something else
+    -- One below the true top (TOOLTIP), not TOOLTIP itself - TOOLTIP is
+    -- reserved exclusively for the dropdown submenu (see Core.lua's
+    -- ShowDropdown). Putting the window there too meant same-strata
+    -- ordering fell to frame level, and the window's own child frames
+    -- (bars, buttons, ...) ended up at a mix of levels relative to the
+    -- dropdown's - some bars rendered above it, some below, producing a
+    -- tangled overlapping mess instead of a clean menu-on-top-of-window.
+    -- FULLSCREEN_DIALOG is still comfortably above virtually all other
+    -- addon UI while leaving TOOLTIP free for the one thing that
+    -- actually needs to render on top of this window itself.
+    f:SetFrameStrata("FULLSCREEN_DIALOG")
     f:SetClampedToScreen(true) -- can't be dragged/pushed off-screen, unlike before
     f:SetMovable(true)
     f:EnableMouse(true)
