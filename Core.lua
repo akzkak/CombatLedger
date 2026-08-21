@@ -186,8 +186,19 @@ end
 -- the exact texture pfUI itself uses for every one of its bars (and
 -- what it applies when it skins other addons' status bars too - see
 -- pfUI/modules/thirdparty-vanilla.lua).
+-- Asks the client's own addon manager directly (IsAddOnLoaded) instead
+-- of inferring pfUI's presence from the shape of the `pfUI` global -
+-- confirmed on a client with pfUI genuinely not loaded (IsAddOnLoaded
+-- returns nil, verified both from the AddOns list and visually - a
+-- completely unstyled vanilla UI, no pfUI skin anywhere) that `pfUI`,
+-- `pfUI.api`, and even `pfUI.api.CreateBackdrop` as a real callable
+-- function were ALL still present. Something else on this client
+-- fully populates a pfUI-shaped table without pfUI ever loading, so no
+-- amount of inspecting that table's shape can be made reliable -
+-- IsAddOnLoaded is authoritative and sidesteps the whole problem.
 function CL.HasPfui()
-    return pfUI ~= nil
+    local ok, loaded = pcall(IsAddOnLoaded, "pfUI")
+    return ok and loaded and true or false
 end
 
 -- "Match pfUI" (default on) mirrors pfUI's own bar texture/font exactly,
@@ -226,7 +237,7 @@ end
 CL.BAR_TEXTURES = {
     { key = "flat", label = "Flat (default)" },
     { key = "blizzard", label = "Blizzard Default" },
-    { key = "raid", label = "Smooth Gradient" },
+    { key = "raid", label = "Smooth Gradient", file = "bar_smooth" },
     { key = "elvui", label = "ElvUI Style", file = "bar_elvui" },
     { key = "gradient", label = "pfUI Gradient", file = "bar_gradient" },
     { key = "striped", label = "Striped", file = "bar_striped" },
@@ -244,9 +255,6 @@ function CL.GetBarTexture()
     local key = CL.GetSetting("barTexture") or "flat"
     if key == "flat" then
         return "Interface\\AddOns\\CombatLedger\\img\\bar"
-    end
-    if key == "raid" then
-        return "Interface\\RaidFrame\\Raid-Bar-Hp-Fill"
     end
     if key ~= "blizzard" then
         local i
@@ -486,6 +494,98 @@ function CL.ApplyButtonSkin(btn, borderR, borderG, borderB)
         if ok then return end
     end
     btn:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)
+end
+
+-- Lightweight click-menu, shared by anything that needs a real dropdown
+-- (the main meter's Mode/Segment buttons, Options' Bar texture/Font/
+-- Number format pickers) - a plain frame + pooled row buttons rather
+-- than Blizzard's UIDropDownMenu, which is finicky to reuse outside its
+-- own templates on this client. Only one can be open at a time
+-- regardless of which button opened it, so this lives here once instead
+-- of every window that wants one building its own copy.
+local dropdownFrame = nil
+local dropdownCatcher = nil -- full-screen invisible button that closes the menu on an outside click
+
+function CL.CloseDropdown()
+    if dropdownFrame then dropdownFrame:Hide() end
+    if dropdownCatcher then dropdownCatcher:Hide() end
+end
+
+-- `options` is an array of { label, onClick, color (optional {r,g,b}) }.
+function CL.ShowDropdown(anchor, options)
+    if not dropdownCatcher then
+        dropdownCatcher = CreateFrame("Button", nil, UIParent)
+        dropdownCatcher:SetAllPoints(UIParent)
+        dropdownCatcher:SetFrameStrata("FULLSCREEN")
+        dropdownCatcher:EnableMouse(true)
+        dropdownCatcher:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        dropdownCatcher:SetScript("OnClick", CL.CloseDropdown)
+    end
+    if not dropdownFrame then
+        dropdownFrame = CreateFrame("Frame", nil, UIParent)
+        dropdownFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+        dropdownFrame:SetBackdrop(CL.WINDOW_BACKDROP)
+        dropdownFrame:SetBackdropColor(0.05, 0.05, 0.05, 0.97)
+        dropdownFrame:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)
+        dropdownFrame.rows = {}
+    end
+
+    dropdownCatcher:Show()
+
+    local ROW_H = 16
+    local width = 150
+    local count = table.getn(options)
+    dropdownFrame:SetWidth(width)
+    dropdownFrame:SetHeight(count * ROW_H + 6)
+    dropdownFrame:ClearAllPoints()
+    dropdownFrame:SetPoint("TOP", anchor, "BOTTOM", 0, -2)
+
+    local i
+    for i = 1, count do
+        local row = dropdownFrame.rows[i]
+        if not row then
+            row = CreateFrame("Button", nil, dropdownFrame)
+            row:SetHeight(ROW_H)
+            row:EnableMouse(true)
+            row:RegisterForClicks("LeftButtonUp")
+            local hl = row:CreateTexture(nil, "HIGHLIGHT")
+            hl:SetAllPoints(row)
+            hl:SetTexture("Interface\\Buttons\\WHITE8X8")
+            hl:SetVertexColor(1, 1, 1, 0.15)
+            local text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            text:SetPoint("LEFT", row, "LEFT", 4, 0)
+            text:SetJustifyH("LEFT")
+            CL.ApplyFont(text)
+            row.text = text
+            dropdownFrame.rows[i] = row
+        end
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", dropdownFrame, "TOPLEFT", 3, -3 - (i - 1) * ROW_H)
+        row:SetPoint("TOPRIGHT", dropdownFrame, "TOPRIGHT", -3, -3 - (i - 1) * ROW_H)
+        row.text:SetText(options[i].label)
+        -- Optional per-row color (e.g. Current/Overall in class color, to
+        -- stand out from the plain-white History entries below them) -
+        -- rows are pooled/reused, so reset to plain white when a row
+        -- doesn't specify one rather than leaking a previous row's color.
+        local color = options[i].color
+        if color then
+            row.text:SetTextColor(color[1], color[2], color[3])
+        else
+            row.text:SetTextColor(1, 1, 1)
+        end
+        local onClick = options[i].onClick
+        row:SetScript("OnClick", function()
+            CL.CloseDropdown()
+            if onClick then onClick() end
+        end)
+        row:Show()
+    end
+    local j
+    for j = count + 1, table.getn(dropdownFrame.rows) do
+        dropdownFrame.rows[j]:Hide()
+    end
+
+    dropdownFrame:Show()
 end
 
 function CL.IsSmoothBars()

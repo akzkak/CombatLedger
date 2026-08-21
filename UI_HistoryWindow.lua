@@ -40,10 +40,9 @@ local function CreateRow(parent, index)
     row:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, -((index - 1) * (ROW_HEIGHT + ROW_GAP)))
     row:SetPoint("TOPRIGHT", parent, "TOPRIGHT", 0, -((index - 1) * (ROW_HEIGHT + ROW_GAP)))
     row:SetBackdrop({
-        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true, tileSize = 8, edgeSize = 8,
-        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+        bgFile = "Interface\\BUTTONS\\WHITE8X8", tile = false, tileSize = 0,
+        edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 1,
+        insets = { left = -1, right = -1, top = -1, bottom = -1 },
     })
     row:SetBackdropColor(0.12, 0.12, 0.12, 0.75)
     row:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
@@ -93,10 +92,9 @@ local function CreateRow(parent, index)
     reportBtn:SetPoint("TOPRIGHT", row, "TOPRIGHT", -21, -3)
     reportBtn:SetFrameLevel(row:GetFrameLevel() + 1)
     reportBtn:SetBackdrop({
-        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true, tileSize = 8, edgeSize = 8,
-        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+        bgFile = "Interface\\BUTTONS\\WHITE8X8", tile = false, tileSize = 0,
+        edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 1,
+        insets = { left = -1, right = -1, top = -1, bottom = -1 },
     })
     reportBtn:SetBackdropColor(0.12, 0.12, 0.12, 0.8)
     local reportLabel = reportBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -185,10 +183,9 @@ local function CreateWindow()
     clearBtn:SetHeight(16)
     clearBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -20)
     clearBtn:SetBackdrop({
-        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true, tileSize = 8, edgeSize = 8,
-        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+        bgFile = "Interface\\BUTTONS\\WHITE8X8", tile = false, tileSize = 0,
+        edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 1,
+        insets = { left = -1, right = -1, top = -1, bottom = -1 },
     })
     clearBtn:SetBackdropColor(0.15, 0.15, 0.15, 0.75)
     clearBtn:SetBackdropBorderColor(1, 0.15, 0.15, 1)

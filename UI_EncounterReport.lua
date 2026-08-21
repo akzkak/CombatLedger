@@ -181,10 +181,9 @@ local function CreateToggleButton(parent, metric, index)
     btn:SetWidth(70)
     btn:SetPoint("TOPLEFT", parent, "TOPLEFT", 6 + (index - 1) * 74, -HEADER_HEIGHT + 2)
     btn:SetBackdrop({
-        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true, tileSize = 8, edgeSize = 8,
-        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+        bgFile = "Interface\\BUTTONS\\WHITE8X8", tile = false, tileSize = 0,
+        edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 1,
+        insets = { left = -1, right = -1, top = -1, bottom = -1 },
     })
     btn:SetBackdropColor(0.12, 0.12, 0.12, 0.8)
     local label = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")

@@ -70,103 +70,9 @@ local instances = {}
 local instanceOrder = {}
 CL.UIWindows = instances
 
--- Lightweight click-menu for the segment button (Current/Overall/recent
--- saved encounters by name) - like Details' encounter selector, or
--- GreedMeter's own segment dropdown. A plain frame + pooled row buttons
--- rather than Blizzard's UIDropDownMenu, which is finicky to reuse
--- outside its own templates on this client. Shared across every window
--- instance - only one can be open at a time regardless of which
--- window's button opened it, so there's no reason for each window to
--- have its own copy.
-local dropdownFrame = nil
-local dropdownCatcher = nil -- full-screen invisible button that closes the menu on an outside click
-
-local function CloseDropdown()
-    if dropdownFrame then dropdownFrame:Hide() end
-    if dropdownCatcher then dropdownCatcher:Hide() end
-end
-
-local function ShowDropdown(anchor, options)
-    if not dropdownCatcher then
-        dropdownCatcher = CreateFrame("Button", nil, UIParent)
-        dropdownCatcher:SetAllPoints(UIParent)
-        dropdownCatcher:SetFrameStrata("FULLSCREEN")
-        dropdownCatcher:EnableMouse(true)
-        dropdownCatcher:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-        dropdownCatcher:SetScript("OnClick", CloseDropdown)
-    end
-    if not dropdownFrame then
-        dropdownFrame = CreateFrame("Frame", nil, UIParent)
-        dropdownFrame:SetFrameStrata("FULLSCREEN_DIALOG")
-        dropdownFrame:SetBackdrop({
-            bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-            tile = true, tileSize = 8, edgeSize = 8,
-            insets = { left = 2, right = 2, top = 2, bottom = 2 },
-        })
-        dropdownFrame:SetBackdropColor(0.05, 0.05, 0.05, 0.97)
-        local tr, tg, tb = CL.GetThemeColor()
-        dropdownFrame:SetBackdropBorderColor(tr, tg, tb, 1)
-        dropdownFrame.rows = {}
-    end
-
-    dropdownCatcher:Show()
-
-    local ROW_H = 16
-    local width = 150
-    local count = table.getn(options)
-    dropdownFrame:SetWidth(width)
-    dropdownFrame:SetHeight(count * ROW_H + 6)
-    dropdownFrame:ClearAllPoints()
-    dropdownFrame:SetPoint("TOP", anchor, "BOTTOM", 0, -2)
-
-    local i
-    for i = 1, count do
-        local row = dropdownFrame.rows[i]
-        if not row then
-            row = CreateFrame("Button", nil, dropdownFrame)
-            row:SetHeight(ROW_H)
-            row:EnableMouse(true)
-            row:RegisterForClicks("LeftButtonUp")
-            local hl = row:CreateTexture(nil, "HIGHLIGHT")
-            hl:SetAllPoints(row)
-            hl:SetTexture("Interface\\Buttons\\WHITE8X8")
-            hl:SetVertexColor(1, 1, 1, 0.15)
-            local text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            text:SetPoint("LEFT", row, "LEFT", 4, 0)
-            text:SetJustifyH("LEFT")
-            CL.ApplyFont(text)
-            row.text = text
-            dropdownFrame.rows[i] = row
-        end
-        row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", dropdownFrame, "TOPLEFT", 3, -3 - (i - 1) * ROW_H)
-        row:SetPoint("TOPRIGHT", dropdownFrame, "TOPRIGHT", -3, -3 - (i - 1) * ROW_H)
-        row.text:SetText(options[i].label)
-        -- Optional per-row color (e.g. Current/Overall in class color, to
-        -- stand out from the plain-white History entries below them) -
-        -- rows are pooled/reused, so reset to plain white when a row
-        -- doesn't specify one rather than leaking a previous row's color.
-        local color = options[i].color
-        if color then
-            row.text:SetTextColor(color[1], color[2], color[3])
-        else
-            row.text:SetTextColor(1, 1, 1)
-        end
-        local onClick = options[i].onClick
-        row:SetScript("OnClick", function()
-            CloseDropdown()
-            if onClick then onClick() end
-        end)
-        row:Show()
-    end
-    local j
-    for j = count + 1, table.getn(dropdownFrame.rows) do
-        dropdownFrame.rows[j]:Hide()
-    end
-
-    dropdownFrame:Show()
-end
+-- Dropdown menu itself (CL.ShowDropdown/CL.CloseDropdown) moved to
+-- Core.lua so UI_Options.lua can use the same one for its Bar texture/
+-- Font/Number format pickers instead of duplicating it.
 
 local function FormatNumber(n)
     return CL.FormatNumber(n)
@@ -643,11 +549,16 @@ local function CreateHeaderButton(parent, width, initialText)
     local btn = CreateFrame("Button", nil, parent)
     btn:SetWidth(width)
     btn:SetHeight(16)
+    -- Flat WHITE8X8 shape, matching the window's own backdrop (see
+    -- CL.WINDOW_BACKDROP) - used to be Blizzard's rounded Tooltip
+    -- border, which stayed even after ApplyButtonSkin started recoloring
+    -- the border to the new near-black flat color, since ApplyButtonSkin
+    -- only ever recolors whatever backdrop shape was already set here -
+    -- it never looked right mixed with the flat window frame around it.
     btn:SetBackdrop({
-        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true, tileSize = 8, edgeSize = 8,
-        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+        bgFile = "Interface\\BUTTONS\\WHITE8X8", tile = false, tileSize = 0,
+        edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 1,
+        insets = { left = -1, right = -1, top = -1, bottom = -1 },
     })
     btn:SetBackdropColor(0.12, 0.12, 0.14, 0.9)
     btn:SetBackdropBorderColor(0.55, 0.55, 0.55, 1)
@@ -704,7 +615,14 @@ local function SetButtonTooltip(btn, title, subtitle, restR, restG, restB)
     end)
     btn:SetScript("OnLeave", function()
         GameTooltip:Hide()
-        if restR and not CL.IsMatchPfui() then btn:SetBackdropBorderColor(restR, restG, restB, 1) end
+        -- Restores to the flat near-black border (matching
+        -- CL.ApplyButtonSkin's own manual-skin color), not the passed-in
+        -- restR/G/B theme color - those are still accepted for callers
+        -- that haven't been updated, but the flat skin no longer uses
+        -- theme-colored chrome, so restoring to it here left the border
+        -- stuck class-colored after the first hover once ApplyButtonSkin
+        -- switched away from it.
+        if restR and not CL.IsMatchPfui() then btn:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1) end
     end)
 end
 
@@ -919,7 +837,7 @@ local function CreateWindowFrame(inst)
                 end })
             end
         end
-        ShowDropdown(segBtn, options)
+        CL.ShowDropdown(segBtn, options)
     end)
     UpdateSegButtonForMode()
     CL.ApplyButtonSkin(segBtn, themeR, themeG, themeB)
@@ -942,7 +860,7 @@ local function CreateWindowFrame(inst)
                 RefreshInstance(inst)
             end })
         end
-        ShowDropdown(modeBtn, options)
+        CL.ShowDropdown(modeBtn, options)
     end)
     SetButtonTooltip(modeBtn, "Mode", "Damage Done / Healing Done / Damage Taken / Deaths / Threat", themeR, themeG, themeB)
     CL.ApplyButtonSkin(modeBtn, themeR, themeG, themeB)
@@ -1215,7 +1133,7 @@ ShowThreatFilterDropdown = function(inst)
         end })
     end
 
-    ShowDropdown(f.segBtn, options)
+    CL.ShowDropdown(f.segBtn, options)
 end
 
 local function NewInstance(id, opts)

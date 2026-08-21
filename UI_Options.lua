@@ -31,13 +31,12 @@ local function CreateSmallButton(parent, width, text)
     btn:SetWidth(width)
     btn:SetHeight(18)
     btn:SetBackdrop({
-        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true, tileSize = 8, edgeSize = 8,
-        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+        bgFile = "Interface\\BUTTONS\\WHITE8X8", tile = false, tileSize = 0,
+        edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 1,
+        insets = { left = -1, right = -1, top = -1, bottom = -1 },
     })
     btn:SetBackdropColor(0.15, 0.15, 0.15, 0.75)
-    btn:SetBackdropBorderColor(0.55, 0.55, 0.55, 1)
+    btn:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)
     local label = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     label:SetAllPoints(btn)
     label:SetJustifyH("CENTER")
@@ -110,15 +109,10 @@ local function CreateWindow()
     f:SetWidth(WINDOW_WIDTH)
     f:SetHeight(WINDOW_HEIGHT)
     f:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-    f:SetBackdrop({
-        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true, tileSize = 16, edgeSize = 16,
-        insets = { left = 4, right = 4, top = 4, bottom = 4 },
-    })
+    f:SetBackdrop(CL.WINDOW_BACKDROP)
     f:SetBackdropColor(0, 0, 0, 0.9)
     local themeR, themeG, themeB, themeHex = CL.GetThemeColor()
-    f:SetBackdropBorderColor(themeR, themeG, themeB, 1)
+    f:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)
     f:SetFrameStrata("DIALOG")
     f:SetMovable(true)
     f:EnableMouse(true)
@@ -281,10 +275,18 @@ local function CreateWindow()
     local textureBtn = CreateSmallButton(pageGeneral, 130, "")
     textureBtn:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 1)
     textureBtn:SetScript("OnClick", function()
-        local cur = CL.GetSetting("barTexture") or "flat"
-        CL.SetSetting("barTexture", CycleKey(CL.GetAvailableBarTextures(), cur))
-        CL.FireAppearanceChanged()
-        RefreshOptionsWindow()
+        local list = CL.GetAvailableBarTextures()
+        local options = {}
+        local i
+        for i = 1, table.getn(list) do
+            local key = list[i].key
+            table.insert(options, { label = list[i].label, onClick = function()
+                CL.SetSetting("barTexture", key)
+                CL.FireAppearanceChanged()
+                RefreshOptionsWindow()
+            end })
+        end
+        CL.ShowDropdown(textureBtn, options)
     end)
     f.textureBtn = textureBtn
 
@@ -311,10 +313,17 @@ local function CreateWindow()
     local fontBtn = CreateSmallButton(pageGeneral, 130, "")
     fontBtn:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 1)
     fontBtn:SetScript("OnClick", function()
-        local cur = CL.GetSetting("fontKey") or "friz"
-        CL.SetSetting("fontKey", CycleKey(CL.FONTS, cur))
-        CL.FireAppearanceChanged()
-        RefreshOptionsWindow()
+        local options = {}
+        local i
+        for i = 1, table.getn(CL.FONTS) do
+            local key = CL.FONTS[i].key
+            table.insert(options, { label = CL.FONTS[i].label, onClick = function()
+                CL.SetSetting("fontKey", key)
+                CL.FireAppearanceChanged()
+                RefreshOptionsWindow()
+            end })
+        end
+        CL.ShowDropdown(fontBtn, options)
     end)
     f.fontBtn = fontBtn
 
@@ -371,10 +380,17 @@ local function CreateWindow()
     local numberFmtBtn = CreateSmallButton(pageGeneral, 130, "")
     numberFmtBtn:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 1)
     numberFmtBtn:SetScript("OnClick", function()
-        local cur = CL.GetSetting("numberFormat") or "abbreviated"
-        CL.SetSetting("numberFormat", CycleKey(CL.NUMBER_FORMATS, cur))
-        CL.FireAppearanceChanged()
-        RefreshOptionsWindow()
+        local options = {}
+        local i
+        for i = 1, table.getn(CL.NUMBER_FORMATS) do
+            local key = CL.NUMBER_FORMATS[i].key
+            table.insert(options, { label = CL.NUMBER_FORMATS[i].label, onClick = function()
+                CL.SetSetting("numberFormat", key)
+                CL.FireAppearanceChanged()
+                RefreshOptionsWindow()
+            end })
+        end
+        CL.ShowDropdown(numberFmtBtn, options)
     end)
     f.numberFmtBtn = numberFmtBtn
 
@@ -385,8 +401,8 @@ local function CreateWindow()
     local opacityStepper = CreateStepper(pageGeneral, 90)
     opacityStepper:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 1)
     opacityStepper.minus:SetScript("OnClick", function()
-        local v = (CL.GetSetting("windowOpacityPct") or 85) - 5
-        if v < 10 then v = 10 end
+        local v = (CL.GetSetting("windowOpacityPct") or 81) - 5
+        if v < 0 then v = 0 end
         CL.SetSetting("windowOpacityPct", v)
         CL.FireAppearanceChanged()
         RefreshOptionsWindow()
@@ -630,13 +646,16 @@ RefreshOptionsWindow = function()
         window.matchPfuiCB:SetChecked(CL.IsMatchPfui())
     end
 
-    window.textureBtn.label:SetText(LabelForKey(CL.GetAvailableBarTextures(), CL.GetSetting("barTexture") or "flat"))
+    -- " |cff999999v|r" suffix marks these as dropdowns (click opens a
+    -- list via CL.ShowDropdown) rather than the cycle-on-click buttons
+    -- they used to be, which wasn't obvious from a plain value label.
+    window.textureBtn.label:SetText(LabelForKey(CL.GetAvailableBarTextures(), CL.GetSetting("barTexture") or "flat") .. " |cff999999v|r")
     window.hideBorderCB:SetChecked(CL.GetSetting("hideBorder"))
-    window.fontBtn.label:SetText(LabelForKey(CL.FONTS, CL.GetSetting("fontKey") or "friz"))
+    window.fontBtn.label:SetText(LabelForKey(CL.FONTS, CL.GetSetting("fontKey") or "friz") .. " |cff999999v|r")
     window.fontSizeStepper.value:SetText(tostring(CL.GetSetting("fontSize") or 10))
     local barHeight = CL.GetSetting("barHeight")
     window.barHeightStepper.value:SetText(barHeight and tostring(barHeight) or "Default")
-    window.numberFmtBtn.label:SetText(LabelForKey(CL.NUMBER_FORMATS, CL.GetSetting("numberFormat") or "abbreviated"))
+    window.numberFmtBtn.label:SetText(LabelForKey(CL.NUMBER_FORMATS, CL.GetSetting("numberFormat") or "abbreviated") .. " |cff999999v|r")
     window.opacityStepper.value:SetText((CL.GetSetting("windowOpacityPct") or 85) .. "%")
 
     local matchOn = CL.IsMatchPfui()
