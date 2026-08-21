@@ -259,8 +259,48 @@ local function GetRosterNames()
     return names
 end
 
+-- Same roster/naming as Aggregator.lua's TEST_ROSTER (Kobeni as the
+-- "player", same class picks) so Test Mode reads as one consistent
+-- preview cast across every mode, not a different fake group per tab.
+-- classToken travels WITH each entry here (unlike the real snapshot,
+-- which only ever carries a name/threat/perc/melee/tank - class comes
+-- from CL.GuidCache.Resolve on a real GUID) since these guids aren't
+-- real and GuidCache has nothing to resolve them to.
+local TEST_THREAT_ROSTER = {
+    { name = "Kobeni", classToken = "WARLOCK", threat = 12500, melee = false, tank = true },
+    { name = "Kaladin", classToken = "WARRIOR", threat = 11800, melee = true, tank = false },
+    { name = "Szeth", classToken = "ROGUE", threat = 8200, melee = true, tank = false },
+    { name = "Dalinar", classToken = "PALADIN", threat = 6100, melee = true, tank = false },
+    { name = "Shallan", classToken = "MAGE", threat = 4300, melee = false, tank = false },
+    { name = "Jasnah", classToken = "PRIEST", threat = 3100, melee = false, tank = false },
+    { name = "Adolin", classToken = "WARRIOR", threat = 2200, melee = true, tank = false },
+}
+
+-- Test Mode's stand-in for GetSnapshot() - same [guid] = {...} shape,
+-- plus classToken (see above). Percentages are computed off the fake
+-- tank's threat, same math the server would normally have already done
+-- for the real perc field.
+local function GetTestSnapshot()
+    local snap = {}
+    local tankThreat = TEST_THREAT_ROSTER[1].threat
+    local i
+    for i = 1, table.getn(TEST_THREAT_ROSTER) do
+        local r = TEST_THREAT_ROSTER[i]
+        snap["TESTTHREAT" .. i] = {
+            name = r.name,
+            classToken = r.classToken,
+            threat = r.threat,
+            perc = math.floor((r.threat / tankThreat) * 100 + 0.5),
+            melee = r.melee,
+            tank = r.tank,
+        }
+    end
+    return snap
+end
+
 CL.Threat = {
     GetSnapshot = function() return current end,
+    GetTestSnapshot = GetTestSnapshot,
     GetTankGuid = function() return tankGuid end,
     IsAvailable = function() return GroupChannel() ~= nil end,
     GetLastUpdate = function() return lastUpdate end,

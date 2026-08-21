@@ -56,10 +56,12 @@ CL.defaultSettings = {
     announceChannel = "auto", -- "auto" (raid > party > say) / "say" / "party" / "raid" / "guild"
     announceCount = 5,
     windowOpacityPct = 81, -- background alpha, as a percent - ignored while matchPfui is on (81 matches the flat skin's pfUI-derived look)
-    autoShowInCombat = true,
-    autoHideOutOfCombat = false,
+    -- autoShowInCombat/autoHideOutOfCombat used to live here - now
+    -- per-window via CL.GetWindowOption/SetWindowOption (see below),
+    -- since different meter windows want different behavior.
     pfuiDock = false, -- dock the main window into pfUI's right chat panel (see UI_PfuiDock.lua) - opt-in, since it moves/resizes the window
     showClassIcon = false, -- class icon before the name on each bar - opt-in, redundant with the existing class-colored bar fill for some tastes
+    classColorMenus = false, -- header/dropdown buttons take the player's class color instead of the flat near-black default - see CL.ApplyButtonSkin
 
     announcePulls = true, -- "Pull: X (spell)" chat print at the start of a boss/elite encounter - see Aggregator.lua's RecordDamage
 }
@@ -146,7 +148,7 @@ end
 -- present "main") should exist, and each window's own mode/segment
 -- choice - same defensive EnsureX/wholesale-replace reasoning as
 -- settings/layout above. Presence of a non-"main" key is what makes
--- UI_MainWindow.lua's UI.RestoreExtraWindows() recreate that window on
+-- UI_MainWindow.lua's UI.RestoreAllWindows() recreate that window on
 -- login; UI.CloseExtraWindow removes its key so it doesn't come back.
 local function EnsureWindowsTable()
     if not CombatLedgerDB.windows then
@@ -167,6 +169,38 @@ end
 function CL.ForgetWindowState(id)
     EnsureWindowsTable()
     CombatLedgerDB.windows[id] = nil
+    if CombatLedgerDB.windowOptions then
+        CombatLedgerDB.windowOptions[id] = nil
+    end
+end
+
+-- Per-window auto-show/auto-hide/only-while-grouped toggles - used to
+-- be addon-wide settings, but a Threat meter you only want up while
+-- grouped and fighting has nothing to do with whether your always-on
+-- Damage meter should behave the same way, so each window now carries
+-- its own copy. Kept in a separate table from CL.SaveWindowState's
+-- mode/segment/threatFilter, which gets wholesale-replaced on every
+-- mode/segment change - these would otherwise risk getting clobbered
+-- back to stale values by the next unrelated SaveWindowState call.
+local function EnsureWindowOptionsTable()
+    if not CombatLedgerDB.windowOptions then
+        CombatLedgerDB.windowOptions = {}
+    end
+end
+
+function CL.GetWindowOption(id, key, default)
+    EnsureWindowOptionsTable()
+    local opts = CombatLedgerDB.windowOptions[id]
+    if not opts or opts[key] == nil then return default end
+    return opts[key]
+end
+
+function CL.SetWindowOption(id, key, value)
+    EnsureWindowOptionsTable()
+    if not CombatLedgerDB.windowOptions[id] then
+        CombatLedgerDB.windowOptions[id] = {}
+    end
+    CombatLedgerDB.windowOptions[id][key] = value
 end
 
 -- Every remembered window id other than "main" (which is handled
@@ -504,23 +538,58 @@ end
 -- SkinButton sets the backdrop directly on the button itself (no child
 -- frame), so there's no orphaned-frame cleanup needed here.
 --
--- "Match pfUI" means look like pfUI, full stop - border color is left
--- to pfUI's own skin (not re-tinted to theme), and pfUI's own hover
--- highlight is left enabled (SetButtonTooltip's own border-highlight
--- self-disables via CL.IsMatchPfui() so the two don't fight over the
--- same border on hover).
+-- "Match pfUI" means look like pfUI, full stop - the base backdrop/
+-- border color at rest comes from pfUI's own skin (not re-tinted to
+-- theme). Hover is a different story: SkinButton's disableHighlight
+-- arg is passed true here so pfUI's own OnEnter/OnLeave hover hook
+-- (pfUI.api.SetHighlight) never gets installed on these buttons at all
+-- - it's a second, independent hover mechanism built on the same raw
+-- OnEnter/OnLeave events we already found unreliable on this client
+-- (see SetButtonTooltip's own OnUpdate-poll rewrite), and since it
+-- fights over the exact same backdrop border, leaving it enabled meant
+-- the click/hover-stuck bug kept happening via pfUI's own hook even
+-- after our side was fixed. SetButtonTooltip's OnUpdate poll owns hover
+-- unconditionally now instead, including while matching pfUI.
 --
--- The manual-skin branch below ignores the passed-in borderR/G/B (kept
--- in the signature since every call site still passes theme color, used
--- elsewhere) in favor of the same near-black FLAT_BORDER_* used on the
--- window itself - consistent flat look, not theme-colored chrome mixed
--- with a neutral window border.
-function CL.ApplyButtonSkin(btn, borderR, borderG, borderB)
-    if CL.IsMatchPfui() and pfUI.api then
-        local ok = pcall(pfUI.api.SkinButton, btn)
-        if ok then return end
+-- The manual-skin branch below uses the near-black FLAT_BORDER_* by
+-- default (consistent flat look, not theme-colored chrome mixed with a
+-- neutral window border) - unless "Show class colored menus" is on,
+-- which brings back the passed-in borderR/G/B (the player's class
+-- color, from CL.GetThemeColor) instead. Off by default; some people
+-- want the buttons to pick up their class color, others find it
+-- clashes with the flat neutral window.
+-- The fill/backdrop color a CreateHeaderButton-style button should show
+-- at rest right now - pfUI's own configured border-background while
+-- matching pfUI (same color CreateBackdrop's legacy branch just used
+-- inside SkinButton above), otherwise the flat default. Shared with
+-- UI_MainWindow.lua's SetButtonTooltip, whose OnUpdate re-asserts this
+-- EVERY frame rather than only on mouse-up/a press timeout - a hardcoded
+-- near-black revert used to fight with pfUI's real (different) color
+-- whenever Match pfUI was on, leaving a clicked button stuck showing
+-- the wrong tone against its never-yet-clicked neighbors.
+function CL.GetButtonNormalFill()
+    if CL.IsMatchPfui() and pfUI.api and pfUI.api.GetStringColor and pfUI_config then
+        local ok, r, g, b, a = pcall(pfUI.api.GetStringColor, pfUI_config.appearance.border.background)
+        if ok and r then return r, g, b, a end
     end
-    btn:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)
+    return 0.12, 0.12, 0.14, 0.9
+end
+
+function CL.ApplyButtonSkin(btn, borderR, borderG, borderB)
+    local matchedPfui = false
+    if CL.IsMatchPfui() and pfUI.api then
+        local ok = pcall(pfUI.api.SkinButton, btn, nil, nil, nil, nil, true)
+        matchedPfui = ok
+    end
+    -- classColorMenus is an explicit opt-in override - it wins even over
+    -- pfUI's own skin border, otherwise it has zero visible effect for
+    -- anyone running with "Match pfUI" on (the default), since SkinButton
+    -- above would already have claimed the border first.
+    if CL.GetSetting("classColorMenus") then
+        btn:SetBackdropBorderColor(borderR, borderG, borderB, 1)
+    elseif not matchedPfui then
+        btn:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)
+    end
 end
 
 -- Lightweight click-menu, shared by anything that needs a real dropdown

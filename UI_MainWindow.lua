@@ -24,7 +24,7 @@ CL.UI = UI
 local MAX_BARS = 20
 local BAR_HEIGHT = 18
 local BAR_GAP = 2
-local HEADER_HEIGHT = 28 -- a few extra px of breathing room below the title/button row before the first bar
+local HEADER_HEIGHT = 28 -- a few extra px of breathing room below the button row before the first bar
 local FOOTER_GAP = 12
 
 local WINDOW_WIDTH, WINDOW_HEIGHT = 220, 260
@@ -45,10 +45,6 @@ local REFRESH_INTERVAL = 0.2
 -- than flowing through GetActiveEncounter like everything else.
 local MODE_ORDER = { "damage", "healing", "taken", "cleanses", "debuffs", "deaths", "threat" }
 local MODE_TITLES = { damage = "Damage Done", healing = "Healing Done", taken = "Damage Taken", cleanses = "Dispels", debuffs = "Debuffs Given", deaths = "Deaths", threat = "Threat" }
--- First-letter button labels (Damage/Deaths both start with "D", so
--- Deaths gets "Dt" to stay distinguishable) - full names still show in
--- each button's hover tooltip and the dropdown menu itself.
-local MODE_BTN_LABELS = { damage = "D", healing = "H", taken = "T", cleanses = "Di", debuffs = "Db", deaths = "Dt", threat = "Th" }
 
 -- Cleanses/Debuffs are counts, not amounts - no meaningful "rate" or
 -- "crit %" the way damage/healing have, so bars/tooltips/announce show
@@ -61,7 +57,12 @@ local function CountLabel(mode, n)
     return n .. " " .. word .. ((n == 1) and "" or "s")
 end
 
-local SEGMENT_LABELS = { current = "C", overall = "O", history = "H" }
+-- Full words now that these show directly on the header buttons instead
+-- of a separate title (see the header-row comment near CreateWindowFrame) -
+-- "history" is only ever a fallback default; the real text once a
+-- specific saved encounter is selected is that encounter's own label
+-- (see ShowHistoryEncounterIn).
+local SEGMENT_LABELS = { current = "Current", overall = "Overall", history = "History" }
 
 -- Every open window, keyed by id. "main" always exists; extra windows
 -- (from Options' "New Window" button) get ids like "window2", "window3",
@@ -69,6 +70,13 @@ local SEGMENT_LABELS = { current = "C", overall = "O", history = "H" }
 local instances = {}
 local instanceOrder = {}
 CL.UIWindows = instances
+
+-- Set right before StaticPopup_Show("COMBATLEDGER_ANNOUNCE") and read
+-- from its OnAccept - a plain captured variable rather than relying on
+-- StaticPopup_Show's own data-passing arguments, whose exact behavior
+-- on this client build isn't worth depending on for something this
+-- simple.
+local pendingAnnounceInst = nil
 
 -- Dropdown menu itself (CL.ShowDropdown/CL.CloseDropdown) moved to
 -- Core.lua so UI_Options.lua can use the same one for its Bar texture/
@@ -142,7 +150,11 @@ end
 -- specifically still need, not the raw threshold.
 local function BuildThreatList(filterSet)
     local list = {}
-    local snapshot = CL.Threat and CL.Threat.GetSnapshot()
+    -- Test Mode substitutes a fake snapshot (see Threat.lua's
+    -- GetTestSnapshot) so Threat mode previews with dummy bars + the
+    -- Pull Aggro At marker below, same as every other mode already did.
+    local snapshot = CL.testMode and CL.Threat and CL.Threat.GetTestSnapshot and CL.Threat.GetTestSnapshot()
+        or (CL.Threat and CL.Threat.GetSnapshot())
     if not snapshot then return list, nil end
     local hasFilter = filterSet and next(filterSet) ~= nil
     local playerName = UnitName("player")
@@ -150,11 +162,18 @@ local function BuildThreatList(filterSet)
     local guid, t
     for guid, t in pairs(snapshot) do
         if not hasFilter or filterSet[t.name] then
-            local info = CL.GuidCache and CL.GuidCache.Resolve(guid)
+            -- Test entries carry their own classToken directly (fake
+            -- guids have nothing for GuidCache to resolve); real ones
+            -- still resolve through the roster cache as before.
+            local classToken = t.classToken
+            if not classToken and CL.GuidCache then
+                local info = CL.GuidCache.Resolve(guid)
+                classToken = info and info.classToken
+            end
             table.insert(list, {
                 guid = guid,
                 name = t.name,
-                classToken = info and info.classToken,
+                classToken = classToken,
                 total = t.threat,
                 perc = t.perc,
                 melee = t.melee,
@@ -518,67 +537,6 @@ end
 local RefreshInstance -- forward-declared, assigned below
 local ShowThreatFilterDropdown -- forward-declared, assigned below
 
--- Re-applies texture/font/height to every pooled bar in every open
--- window after an Options change, and repositions each pool (bar
--- Y-offsets were computed from the height at creation time).
-local function RestyleAll()
-    local id, inst
-    for id, inst in pairs(instances) do
-        local window = inst.frame
-        if window then
-            if CL.GetSetting("lockWindow") then
-                window.resizeGrip:Hide()
-            else
-                window.resizeGrip:Show()
-            end
-            window.barScroll:ClearAllPoints()
-            window.barScroll:SetPoint("TOPLEFT", window, "TOPLEFT", 6, -HEADER_HEIGHT)
-            window.barScroll:SetPoint("BOTTOMRIGHT", window, "BOTTOMRIGHT", -6, FooterGap())
-            window.barParent:SetWidth(window:GetWidth() - 12)
-            -- Height is sized to the actual shown count, not the full
-            -- MAX_BARS pool (see RefreshInstance) - invalidate the
-            -- cached count so the refresh below recomputes it for the
-            -- new bar height instead of leaving it at a stale size.
-            inst.lastShownCount = -1
-            local themeR, themeG, themeB = CL.GetThemeColor()
-            CL.ApplyWindowSkin(window, themeR, themeG, themeB, 0.8)
-            CL.ApplyButtonSkin(window.resetBtn, themeR, themeG, themeB)
-            CL.ApplyButtonSkin(window.optionsBtn, themeR, themeG, themeB)
-            CL.ApplyButtonSkin(window.announceBtn, themeR, themeG, themeB)
-            CL.ApplyButtonSkin(window.segBtn, themeR, themeG, themeB)
-            CL.ApplyButtonSkin(window.modeBtn, themeR, themeG, themeB)
-            CL.ApplyFont(window.title)
-            CL.ApplyFont(window.resetBtn.label)
-            CL.ApplyFont(window.optionsBtn.label)
-            CL.ApplyFont(window.announceBtn.label)
-            CL.ApplyFont(window.segBtn.label)
-            CL.ApplyFont(window.modeBtn.label)
-            local newBarHeight = CL.GetBarHeight(BAR_HEIGHT)
-            CL.RepositionBarPool(inst.bars, newBarHeight, BAR_GAP)
-            local i
-            for i = 1, table.getn(inst.bars) do
-                local bar = inst.bars[i]
-                bar:SetStatusBarTexture(CL.GetBarTexture())
-                bar.bg:SetTexture(CL.GetBarTexture())
-                CL.ApplyFont(bar.nameText, CL.GetFontSize())
-                CL.ApplyFont(bar.valueText, CL.GetFontSize())
-                -- Class icon was sized once at bar creation from
-                -- whatever the bar height was then - never followed a
-                -- later "Bar size" change, so it stayed a fixed size
-                -- while the bar around it grew/shrank.
-                bar.classIcon:SetWidth(newBarHeight - 4)
-                bar.classIcon:SetHeight(newBarHeight - 4)
-            end
-            RefreshInstance(inst)
-        end
-    end
-    -- Dropdown row fonts aren't refreshed here - CL.ShowDropdown (Core.lua)
-    -- already re-applies CL.ApplyFont to every row's text each time it
-    -- opens, so there's nothing stale to catch up on a pure appearance
-    -- change while it's closed.
-end
-CL.OnAppearanceChanged(RestyleAll)
-
 local function CreateHeaderButton(parent, width, initialText)
     local btn = CreateFrame("Button", nil, parent)
     btn:SetWidth(width)
@@ -613,11 +571,19 @@ local function CreateHeaderButton(parent, width, initialText)
     -- Click feedback (darkens briefly on press) - a plain backdrop box
     -- otherwise gives zero visual response to a click, part of why it
     -- reads as "off" without pfUI's own button skin doing this for us.
+    -- OnMouseUp gives the snappy revert when it fires, but it's NOT
+    -- reliable on this client once the click opens a dropdown/popup/new
+    -- window mid-interaction (confirmed - R/O/! don't even open anything
+    -- and still stuck) - btn.pressedAt is a safety net SetButtonTooltip's
+    -- OnUpdate polls to force the revert even if OnMouseUp never comes.
     btn:SetScript("OnMouseDown", function()
+        btn.pressedAt = GetTime()
         btn:SetBackdropColor(0.05, 0.05, 0.06, 0.9)
     end)
     btn:SetScript("OnMouseUp", function()
-        btn:SetBackdropColor(0.12, 0.12, 0.14, 0.9)
+        btn.pressedAt = nil
+        local fr, fg, fb, fa = CL.GetButtonNormalFill()
+        btn:SetBackdropColor(fr, fg, fb, fa)
     end)
 
     local label = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -629,34 +595,217 @@ local function CreateHeaderButton(parent, width, initialText)
     return btn
 end
 
--- restR/G/B (optional) is the button's normal border color - if given,
--- hovering brightens the border to white and leaving restores it,
--- independent of pfUI's own skin-time highlight hook (which stacks via
--- HookScript and can leave a button with no visible hover feedback once
--- enough buttons chain together - simpler to just own this ourselves
--- than rely on pfUI's hook order).
-local function SetButtonTooltip(btn, title, subtitle, restR, restG, restB)
-    btn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(btn, "ANCHOR_BOTTOM")
-        GameTooltip:SetText(title, 1, 1, 1)
-        if subtitle then
-            GameTooltip:AddLine(subtitle, 0.7, 0.7, 0.7)
+-- Sets a CreateHeaderButton's label text and resizes the button to fit
+-- it (label is SetAllPoints to the button, so resizing the button
+-- resizes it) - used by modeBtn/segBtn now that they show full words
+-- ("Damage Done", "Overall", a saved encounter's name) instead of a
+-- fixed-width letter code.
+--
+-- Width comes from ComputeHeaderButtonWidths(parent's CURRENT width),
+-- not from the text itself - Overall/Current/a long encounter name all
+-- get the SAME width at a given window size, which is what stops the
+-- button jumping around on every label change. That width isn't a fixed
+-- constant either, though - it shrinks along with the window (see the
+-- resize grip's OnUpdate, which reflows both buttons live on every
+-- drag tick) so the window can still be dragged down small instead of
+-- being floored at whatever width the full-word buttons prefer.
+--
+-- Text that doesn't fit the resulting width gets truncated with "..."
+-- rather than just capping the button's own width and leaving the
+-- label to render past it - a CENTER-justified FontString isn't
+-- clipped by its own frame in vanilla, so an oversized string bled
+-- visually into whatever button sat next to it instead of just getting
+-- cut off at its own edge. btn.fullText/btn.isSegBtn remember the
+-- untruncated text and role so a later reflow (font-size change, window
+-- resize) can re-run this from the real original text instead of
+-- re-truncating an already-truncated one.
+local SEG_BTN_PREFERRED, MODE_BTN_PREFERRED = 90, 100
+local HEADER_BTN_MIN_WIDTH = 20
+-- Space the left button group (margin + R/!) actually occupies, plus
+-- breathing room before Mode/Segment start - see CreateWindowFrame's
+-- real anchor math (resetBtn/announceBtn) for what this approximates.
+local HEADER_LEFT_GROUP_WIDTH = 46
+local HEADER_RIGHT_PADDING = 20
+
+local function ComputeHeaderButtonWidths(windowWidth)
+    local preferredTotal = SEG_BTN_PREFERRED + MODE_BTN_PREFERRED
+    local available = (windowWidth or 0) - HEADER_LEFT_GROUP_WIDTH - HEADER_RIGHT_PADDING
+    if available >= preferredTotal then
+        return SEG_BTN_PREFERRED, MODE_BTN_PREFERRED
+    end
+    if available < HEADER_BTN_MIN_WIDTH * 2 then
+        available = HEADER_BTN_MIN_WIDTH * 2
+    end
+    return available * (SEG_BTN_PREFERRED / preferredTotal), available * (MODE_BTN_PREFERRED / preferredTotal)
+end
+
+local function SetHeaderButtonText(btn, text, isSegBtn)
+    btn.fullText = text
+    btn.isSegBtn = isSegBtn
+    btn.label:SetText(text)
+    local parent = btn:GetParent()
+    local segW, modeW = ComputeHeaderButtonWidths(parent and parent:GetWidth())
+    local w = isSegBtn and segW or modeW
+    local target = w - 12
+    if btn.label:GetStringWidth() > target then
+        local truncated = text
+        while string.len(truncated) > 1 and btn.label:GetStringWidth() > target do
+            truncated = string.sub(truncated, 1, string.len(truncated) - 1)
+            btn.label:SetText(truncated .. "...")
         end
-        GameTooltip:Show()
-        -- Skipped while matching pfUI - pfUI's own hover highlight
-        -- (from SkinButton) owns the border then, not this.
-        if restR and not CL.IsMatchPfui() then btn:SetBackdropBorderColor(1, 1, 1, 1) end
-    end)
-    btn:SetScript("OnLeave", function()
-        GameTooltip:Hide()
-        -- Restores to the flat near-black border (matching
-        -- CL.ApplyButtonSkin's own manual-skin color), not the passed-in
-        -- restR/G/B theme color - those are still accepted for callers
-        -- that haven't been updated, but the flat skin no longer uses
-        -- theme-colored chrome, so restoring to it here left the border
-        -- stuck class-colored after the first hover once ApplyButtonSkin
-        -- switched away from it.
-        if restR and not CL.IsMatchPfui() then btn:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1) end
+    end
+    btn:SetWidth(w)
+end
+
+-- Re-runs SetHeaderButtonText from the remembered original text/role -
+-- for RestyleAll's font-size-change refresh and the resize grip's live
+-- drag, where the button's available width may have changed without
+-- the underlying text changing.
+local function ReflowHeaderButton(btn)
+    if btn.fullText then
+        SetHeaderButtonText(btn, btn.fullText, btn.isSegBtn)
+    end
+end
+
+-- Re-applies texture/font/height to every pooled bar in every open
+-- window after an Options change, and repositions each pool (bar
+-- Y-offsets were computed from the height at creation time).
+local function RestyleAll()
+    local id, inst
+    for id, inst in pairs(instances) do
+        local window = inst.frame
+        if window then
+            if CL.GetSetting("lockWindow") then
+                window.resizeGrip:Hide()
+            else
+                window.resizeGrip:Show()
+            end
+            window.barScroll:ClearAllPoints()
+            window.barScroll:SetPoint("TOPLEFT", window, "TOPLEFT", 6, -HEADER_HEIGHT)
+            window.barScroll:SetPoint("BOTTOMRIGHT", window, "BOTTOMRIGHT", -6, FooterGap())
+            window.barParent:SetWidth(window:GetWidth() - 12)
+            -- Height is sized to the actual shown count, not the full
+            -- MAX_BARS pool (see RefreshInstance) - invalidate the
+            -- cached count so the refresh below recomputes it for the
+            -- new bar height instead of leaving it at a stale size.
+            inst.lastShownCount = -1
+            local themeR, themeG, themeB = CL.GetThemeColor()
+            CL.ApplyWindowSkin(window, themeR, themeG, themeB, 0.8)
+            CL.ApplyButtonSkin(window.resetBtn, themeR, themeG, themeB)
+            CL.ApplyButtonSkin(window.announceBtn, themeR, themeG, themeB)
+            CL.ApplyButtonSkin(window.segBtn, themeR, themeG, themeB)
+            CL.ApplyButtonSkin(window.modeBtn, themeR, themeG, themeB)
+            CL.ApplyFont(window.resetBtn.label)
+            CL.ApplyFont(window.announceBtn.label)
+            CL.ApplyFont(window.segBtn.label)
+            CL.ApplyFont(window.modeBtn.label)
+            -- A font change can change these labels' rendered width too
+            -- (they show full words now, not a fixed letter code) - keep
+            -- them properly fit, not just re-fit at the next mode/segment
+            -- switch.
+            ReflowHeaderButton(window.segBtn)
+            ReflowHeaderButton(window.modeBtn)
+            local newBarHeight = CL.GetBarHeight(BAR_HEIGHT)
+            CL.RepositionBarPool(inst.bars, newBarHeight, BAR_GAP)
+            local i
+            for i = 1, table.getn(inst.bars) do
+                local bar = inst.bars[i]
+                bar:SetStatusBarTexture(CL.GetBarTexture())
+                bar.bg:SetTexture(CL.GetBarTexture())
+                CL.ApplyFont(bar.nameText, CL.GetFontSize())
+                CL.ApplyFont(bar.valueText, CL.GetFontSize())
+                -- Class icon was sized once at bar creation from
+                -- whatever the bar height was then - never followed a
+                -- later "Bar size" change, so it stayed a fixed size
+                -- while the bar around it grew/shrank.
+                bar.classIcon:SetWidth(newBarHeight - 4)
+                bar.classIcon:SetHeight(newBarHeight - 4)
+            end
+            RefreshInstance(inst)
+        end
+    end
+    -- Dropdown row fonts aren't refreshed here - CL.ShowDropdown (Core.lua)
+    -- already re-applies CL.ApplyFont to every row's text each time it
+    -- opens, so there's nothing stale to catch up on a pure appearance
+    -- change while it's closed.
+end
+CL.OnAppearanceChanged(RestyleAll)
+
+-- restR/G/B (optional) is the button's normal border color - if given,
+-- hovering brightens the border to white and leaving restores it. This
+-- OWNS hover unconditionally now, including while matching pfUI - see
+-- CL.ApplyButtonSkin, which passes disableHighlight=true to pfUI's own
+-- SkinButton specifically so IT never installs a second, independent
+-- OnEnter/OnLeave hover hook on these buttons that would otherwise
+-- fight over the same border. That pfUI-owned hook was the real source
+-- of the click/hover-stuck-color bug surviving past the first fix below
+-- - it's built on the same raw OnEnter/OnLeave events already proven
+-- unreliable here, and it was still fully enabled/wired up whenever
+-- Match pfUI was on (the default), regardless of anything this function
+-- did on its own side.
+--
+-- alwaysRestR/G/B (optional) - when given, hover-leave restores to
+-- exactly this color unconditionally, ignoring both "Match pfUI" and
+-- "Class colored menus". For a fixed-color button (nothing currently
+-- uses this, but Reset used to) that shouldn't follow either setting
+-- the way every other button's border does.
+--
+-- Driven entirely off an OnUpdate poll of MouseIsOver rather than
+-- OnEnter/OnLeave (and CreateHeaderButton's press-color off a polled
+-- btn.pressedAt timeout rather than trusting OnMouseUp) - confirmed on
+-- this client that a click opening a dropdown/popup/new window can
+-- swallow the matching Up/Leave event, leaving the button stuck
+-- pressed-dark or hover-white. Polling every frame is immune to that
+-- since it doesn't depend on any event actually being delivered - and
+-- unlike the old timeout-only revert, the fill color below is now
+-- CONTINUOUSLY re-asserted every frame whenever not pressed (not just
+-- once, 0.15s after a click), so nothing can leave one button showing a
+-- different tone than its never-yet-clicked neighbors and have it stick.
+local function SetButtonTooltip(btn, title, subtitle, restR, restG, restB, alwaysRestR, alwaysRestG, alwaysRestB)
+    local function NormalBorderColor()
+        if alwaysRestR then return alwaysRestR, alwaysRestG, alwaysRestB end
+        if restR and CL.GetSetting("classColorMenus") then return restR, restG, restB end
+        -- Matches CL.ApplyButtonSkin's own resting color while pfUI is
+        -- matched (SkinButton's CreateBackdrop call sets exactly this),
+        -- so owning hover unconditionally doesn't fight the rest-state
+        -- color pfUI itself set up.
+        if CL.IsMatchPfui() and pfUI.api and pfUI.api.GetStringColor and pfUI_config then
+            local ok, r, g, b = pcall(pfUI.api.GetStringColor, pfUI_config.appearance.border.color)
+            if ok and r then return r, g, b end
+        end
+        return CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B
+    end
+    local wasOver = false
+    btn:SetScript("OnUpdate", function()
+        if btn.pressedAt and (GetTime() - btn.pressedAt) > 0.15 then
+            btn.pressedAt = nil
+        end
+        if not btn.pressedAt then
+            local fr, fg, fb, fa = CL.GetButtonNormalFill()
+            btn:SetBackdropColor(fr, fg, fb, fa)
+        end
+        local isOver = MouseIsOver(btn)
+        if isOver ~= wasOver then
+            if isOver then
+                GameTooltip:SetOwner(btn, "ANCHOR_BOTTOM")
+                GameTooltip:SetText(title, 1, 1, 1)
+                if subtitle then
+                    GameTooltip:AddLine(subtitle, 0.7, 0.7, 0.7)
+                end
+                GameTooltip:Show()
+            else
+                GameTooltip:Hide()
+            end
+            wasOver = isOver
+        end
+        if restR then
+            if isOver then
+                btn:SetBackdropBorderColor(1, 1, 1, 1)
+            else
+                local r, g, b = NormalBorderColor()
+                btn:SetBackdropBorderColor(r, g, b, 1)
+            end
+        end
     end)
 end
 
@@ -766,22 +915,17 @@ local function CreateWindowFrame(inst)
     -- should vanish on a stray Escape (easy to hit by accident while
     -- canceling a cast, closing another window, etc). Only /cl hide,
     -- /cl toggle, and (for extra windows) the close button hide it.
-    local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("TOP", f, "TOP", 0, -6)
-    title:SetText("|cff" .. themeHex .. MODE_TITLES[f.mode] .. "|r")
-    CL.ApplyFont(title)
-    f.title = title
+    --
+    -- No separate title FontString anymore - modeBtn/segBtn below show
+    -- the full mode name and segment directly (used to be short letter
+    -- codes with a centered title stating the mode again), which reads
+    -- just as clearly without a second element competing with the
+    -- buttons for space at a narrow window width.
 
-    -- Forward-declared - assigned once announceBtn/modeBtn exist below,
-    -- referenced by both the resize grip's OnUpdate further down and
-    -- the mode-dropdown's onClick above the assignment point (both are
-    -- closures that only run later, so the upvalue just needs to exist
-    -- here, not be assigned yet).
-    local UpdateTitleVisibility
-
-    -- Second header row: Reset (left) ... Mode | Segment (right, click-
-    -- to-cycle). Compact single-letter labels - full names are still in
-    -- each button's hover tooltip and in the dropdown menu itself.
+    -- Header row: Reset/Announce (left, compact single-letter - full
+    -- names live in each button's own hover tooltip) ... Mode |
+    -- Segment (right, click opens a dropdown - these two show the full
+    -- word/name directly, see SetHeaderButtonText).
     local resetBtn = CreateHeaderButton(f, 18, "R")
     resetBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -6)
     resetBtn:SetScript("OnClick", function()
@@ -791,67 +935,55 @@ local function CreateWindowFrame(inst)
     CL.ApplyButtonSkin(resetBtn, themeR, themeG, themeB)
     f.resetBtn = resetBtn
 
-    local optionsBtn = CreateHeaderButton(f, 18, "O")
-    optionsBtn:SetPoint("LEFT", resetBtn, "RIGHT", 4, 0)
-    optionsBtn:SetScript("OnClick", function()
-        if CL.UIOptions then CL.UIOptions.Toggle() end
-    end)
-    SetButtonTooltip(optionsBtn, "Options", "Lock window, minimap button, timing settings", themeR, themeG, themeB)
-    CL.ApplyButtonSkin(optionsBtn, themeR, themeG, themeB)
-    f.optionsBtn = optionsBtn
-
+    -- No header Options button anymore - redundant with the minimap
+    -- icon's right-click (see UI_Options.lua's CreateMinimapButton),
+    -- which already opens the exact same window; /cl options still
+    -- works too if the minimap icon itself is hidden.
     local announceBtn = CreateHeaderButton(f, 18, "!")
-    announceBtn:SetPoint("LEFT", optionsBtn, "RIGHT", 4, 0)
+    announceBtn:SetPoint("LEFT", resetBtn, "RIGHT", 4, 0)
     announceBtn:SetScript("OnClick", function()
-        AnnounceTop(inst)
+        -- Confirm first - this button sits right next to Options/Reset
+        -- in the header, easy to fat-finger, and firing it by accident
+        -- spams whatever chat channel is configured.
+        pendingAnnounceInst = inst
+        StaticPopup_Show("COMBATLEDGER_ANNOUNCE", CL.GetSetting("announceCount") or 5)
     end)
     SetButtonTooltip(announceBtn, "Announce", "Post the top " .. (CL.GetSetting("announceCount") or 5) ..
         " to chat (channel/count set in Options)", themeR, themeG, themeB)
     CL.ApplyButtonSkin(announceBtn, themeR, themeG, themeB)
     f.announceBtn = announceBtn
 
-    -- Extra (non-main) windows get a close button - main only ever
-    -- hides via /cl hide / /cl toggle, matching its original behavior.
-    -- Created before segBtn/modeBtn so they can anchor off it (avoids
-    -- the segment button sitting underneath it in the same corner).
-    local closeBtn = nil
-    if id ~= "main" then
-        closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-        closeBtn:SetWidth(18)
-        closeBtn:SetHeight(18)
-        closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
-        closeBtn:SetScript("OnClick", function()
-            UI.CloseExtraWindow(id)
-        end)
-        f.closeBtn = closeBtn
-        if pfUI and pfUI.api then
-            pcall(pfUI.api.SkinCloseButton, closeBtn)
-        end
-    end
-
-    local segBtn = CreateHeaderButton(f, 20, (f.mode == "threat") and "F" or SEGMENT_LABELS[f.segment])
-    if closeBtn then
-        segBtn:SetPoint("TOPRIGHT", closeBtn, "TOPLEFT", -2, 0)
-    else
-        segBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -6)
-    end
+    -- No per-window close button anymore - extra windows are created and
+    -- closed exclusively from Options' Windows list now (CL.UI.
+    -- CreateExtraWindow/CloseExtraWindow, wired up in UI_Options.lua),
+    -- so every window's header is now IDENTICAL (main and extra both
+    -- anchor segBtn straight off the window's own TOPRIGHT) instead of
+    -- extra windows needing their own close-button-aware anchor math.
+    local segBtn = CreateHeaderButton(f, 20, "")
+    SetHeaderButtonText(segBtn, (f.mode == "threat") and "Filter" or SEGMENT_LABELS[f.segment], true)
+    segBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -6)
 
     -- Threat has no Current/Overall/History (see Threat.lua) - this
-    -- button becomes a name filter for it instead ("F"), same slot,
-    -- different job. Called once at creation (a window can be created
-    -- already in Threat mode, from a saved window state) and again on
-    -- every mode switch.
+    -- button becomes a name filter for it instead ("Filter"), same
+    -- slot, different job. Called once at creation (a window can be
+    -- created already in Threat mode, from a saved window state) and
+    -- again on every mode switch.
     local function UpdateSegButtonForMode()
         if f.mode == "threat" then
-            segBtn.label:SetText("F")
+            SetHeaderButtonText(segBtn, "Filter", true)
             SetButtonTooltip(segBtn, "Filter", "Choose which raid/party members show up in Threat mode", themeR, themeG, themeB)
         else
-            segBtn.label:SetText(SEGMENT_LABELS[f.segment])
+            SetHeaderButtonText(segBtn, SEGMENT_LABELS[f.segment], true)
             SetButtonTooltip(segBtn, "Segment", "Current Fight / Overall / a recent saved encounter", themeR, themeG, themeB)
         end
     end
 
     segBtn:SetScript("OnClick", function()
+        -- Explicit, unconditional reset rather than relying on OnMouseUp
+        -- (see CreateHeaderButton) to restore the press-darken color -
+        -- opening a dropdown/menu from this handler was leaving it stuck
+        -- in the darkened "pressed" state instead of releasing normally.
+        segBtn:SetBackdropColor(0.12, 0.12, 0.14, 0.9)
         if f.mode == "threat" then
             ShowThreatFilterDropdown(inst)
             return
@@ -860,13 +992,13 @@ local function CreateWindowFrame(inst)
         local classColor = PlayerClassColorTable()
         table.insert(options, { label = "Overall", color = classColor, onClick = function()
             f.segment = "overall"
-            segBtn.label:SetText(SEGMENT_LABELS.overall)
+            SetHeaderButtonText(segBtn, SEGMENT_LABELS.overall, true)
             CL.SaveWindowState(id, f.mode, f.segment, f.threatFilter)
             RefreshInstance(inst)
         end })
         table.insert(options, { label = "Current", color = classColor, onClick = function()
             f.segment = "current"
-            segBtn.label:SetText(SEGMENT_LABELS.current)
+            SetHeaderButtonText(segBtn, SEGMENT_LABELS.current, true)
             CL.SaveWindowState(id, f.mode, f.segment, f.threatFilter)
             RefreshInstance(inst)
         end })
@@ -888,18 +1020,19 @@ local function CreateWindowFrame(inst)
     CL.ApplyButtonSkin(segBtn, themeR, themeG, themeB)
     f.segBtn = segBtn
 
-    local modeBtn = CreateHeaderButton(f, 20, MODE_BTN_LABELS[f.mode])
+    local modeBtn = CreateHeaderButton(f, 20, "")
+    SetHeaderButtonText(modeBtn, MODE_TITLES[f.mode] or f.mode, false)
     modeBtn:SetPoint("RIGHT", segBtn, "LEFT", -4, 0)
     modeBtn:SetScript("OnClick", function()
+        -- Same explicit reset as segBtn above - see that comment.
+        modeBtn:SetBackdropColor(0.12, 0.12, 0.14, 0.9)
         local options = {}
         local i
         for i = 1, table.getn(MODE_ORDER) do
             local key = MODE_ORDER[i]
             table.insert(options, { label = MODE_TITLES[key] or key, onClick = function()
                 f.mode = key
-                modeBtn.label:SetText(MODE_BTN_LABELS[key] or key)
-                f.title:SetText("|cff" .. themeHex .. MODE_TITLES[key] .. "|r")
-                UpdateTitleVisibility()
+                SetHeaderButtonText(modeBtn, MODE_TITLES[key] or key, false)
                 UpdateSegButtonForMode()
                 CL.SaveWindowState(id, f.mode, f.segment, f.threatFilter)
                 RefreshInstance(inst)
@@ -910,26 +1043,6 @@ local function CreateWindowFrame(inst)
     SetButtonTooltip(modeBtn, "Mode", "Damage Done / Healing Done / Damage Taken / Deaths / Threat", themeR, themeG, themeB)
     CL.ApplyButtonSkin(modeBtn, themeR, themeG, themeB)
     f.modeBtn = modeBtn
-
-    -- The title sits centered on the SAME row as the header buttons
-    -- (see resetBtn/segBtn above) - fine at normal widths where there's
-    -- clear space between the two button clusters, but at a narrow
-    -- resize the title's actual rendered text can be wider than that
-    -- gap and overlaps the buttons into an unreadable mess. Measuring
-    -- the real gap (announceBtn's right edge to modeBtn's left edge)
-    -- against the title's actual string width - not a fixed width
-    -- threshold - means a short title like "Deaths" stays visible
-    -- longer than "Debuffs Given" would, instead of both hiding at the
-    -- same arbitrary cutoff.
-    UpdateTitleVisibility = function()
-        local gap = modeBtn:GetLeft() - announceBtn:GetRight()
-        if gap < title:GetStringWidth() + 6 then
-            title:Hide()
-        else
-            title:Show()
-        end
-    end
-    UpdateTitleVisibility()
 
     -- A real ScrollFrame (not a whole-row index shift like the History
     -- window) so a bar that only partially fits the remaining space
@@ -1012,7 +1125,11 @@ local function CreateWindowFrame(inst)
         f:SetWidth(newW)
         f:SetHeight(newH)
         barParent:SetWidth(newW - 12)
-        UpdateTitleVisibility()
+        -- Mode/Segment shrink live as the window narrows (see
+        -- SetHeaderButtonText) instead of only picking up the new width
+        -- on the next label change.
+        ReflowHeaderButton(f.segBtn)
+        ReflowHeaderButton(f.modeBtn)
     end)
     if CL.GetSetting("lockWindow") then grip:Hide() end
     f.resizeGrip = grip
@@ -1228,8 +1345,8 @@ function UI.ShowHistoryEncounterIn(inst, encounter)
     if not inst.frame then CreateWindowFrame(inst) end
     inst.frame.segment = "history"
     inst.frame.historyEncounter = encounter
-    if inst.frame.segBtn and inst.frame.segBtn.label then
-        inst.frame.segBtn.label:SetText(SEGMENT_LABELS.history)
+    if inst.frame.segBtn then
+        SetHeaderButtonText(inst.frame.segBtn, encounter.label or SEGMENT_LABELS.history, true)
     end
     CL.SaveWindowState(inst.id, inst.frame.mode, inst.frame.segment, inst.frame.threatFilter)
     inst.frame:Show()
@@ -1286,17 +1403,52 @@ function UI.CloseExtraWindow(id)
     CL.ForgetWindowState(id)
 end
 
--- Recreates every extra window remembered from a previous session (main
--- is handled separately by UI.Show, see Events.lua). Safe to call once,
--- after the real SavedVariables are restored.
-function UI.RestoreExtraWindows()
+local function IsGrouped()
+    return ((GetNumRaidMembers and GetNumRaidMembers()) or 0) > 0
+        or ((GetNumPartyMembers and GetNumPartyMembers()) or 0) > 0
+end
+
+-- Whether id's own Auto-hide/Grouped-only rules currently forbid
+-- showing it, given LIVE combat/group state right now. Shared by
+-- login/reload restore (below) and by Options' Hide/Grouped checkboxes
+-- (UI_Options.lua) - unchecking one of those two shouldn't force the
+-- window into view if the OTHER rule still says it shouldn't be up
+-- (e.g. unchecking Auto-hide while Grouped-only is on and you're
+-- solo used to show the window anyway, which was wrong).
+function UI.IsSuppressedNow(id)
+    local onlyGrouped = CL.GetWindowOption(id, "onlyShowGrouped", false)
+    if onlyGrouped and not IsGrouped() then return true end
+    local autoHide = CL.GetWindowOption(id, "autoHideOutOfCombat", false)
+    if autoHide and not UnitAffectingCombat("player") then return true end
+    return false
+end
+
+-- Restores every window (main + every remembered extra) at login/
+-- reload, honoring each window's own Auto-hide/Grouped-only rules
+-- instead of unconditionally showing everything and letting the first
+-- combat/group event sort it out later - a window set to only ever be
+-- up while grouped-and-fighting shouldn't flash on-screen at login just
+-- because nothing has "happened" yet to hide it again. Auto-show plays
+-- no part here on purpose - it's a "combat just started" trigger, not a
+-- statement about the window's resting state.
+function UI.RestoreAllWindows()
+    local function RestoreOne(id, inst)
+        if UI.IsSuppressedNow(id) then
+            CreateWindowFrame(inst)
+            inst.frame:Hide()
+        else
+            ShowInstance(inst)
+        end
+    end
+
+    RestoreOne("main", instances["main"])
+
     local ids = CL.GetExtraWindowIds()
     local i
     for i = 1, table.getn(ids) do
         local id = ids[i]
         if id ~= "main" and not instances[id] then
-            local inst = NewInstance(id)
-            ShowInstance(inst)
+            RestoreOne(id, NewInstance(id))
         end
     end
 end
@@ -1308,12 +1460,36 @@ end
 
 local mainInst = NewInstance("main")
 
+-- Show/Hide/Toggle apply to EVERY open window now, not just main - the
+-- minimap icon's left-click, /cl toggle, and auto-show-in-combat/auto-
+-- hide-out-of-combat are all addon-wide behaviors, not main-window-only
+-- ones, and with extra windows no longer having their own close button
+-- (see CreateWindowFrame - creation/closing is Options-only now), main
+-- was the only thing responding to any of them, leaving secondary
+-- meters stuck showing (or hidden) regardless. Toggle's own on/off
+-- decision still keys off mainInst specifically, treating it as the
+-- reference point for "are we currently shown."
+--
+-- Show skips any window UI.IsSuppressedNow says shouldn't be up right
+-- now (Grouped-only and you're solo, or Auto-hide and you're out of
+-- combat) - a manual toggle used to force EVERY window on regardless,
+-- which directly defeated the point of those settings (a Threat meter
+-- set to grouped-only would still pop up solo the moment you clicked
+-- the minimap icon).
 function UI.Show()
-    ShowInstance(mainInst)
+    local id, inst
+    for id, inst in pairs(instances) do
+        if not UI.IsSuppressedNow(id) then
+            ShowInstance(inst)
+        end
+    end
 end
 
 function UI.Hide()
-    if mainInst.frame then mainInst.frame:Hide() end
+    local id, inst
+    for id, inst in pairs(instances) do
+        if inst.frame then inst.frame:Hide() end
+    end
 end
 
 function UI.Toggle()
@@ -1321,6 +1497,83 @@ function UI.Toggle()
         UI.Hide()
     else
         UI.Show()
+    end
+end
+
+-- One-time copy of Main's current size/position onto another window -
+-- not a persistent link, so either window can still be freely resized/
+-- moved afterward without dragging the other one along. Reuses
+-- CL.SaveLayout (normally called from a window's own resize-grip/drag
+-- handlers on itself) by pointing it at mainInst's frame but saving
+-- under the TARGET window's id, then re-applies that saved layout to
+-- the target's actual frame if it's currently open.
+function UI.MirrorMainLayout(id)
+    if id == "main" or not mainInst.frame then return end
+    CL.SaveLayout(id, mainInst.frame)
+    local inst = instances[id]
+    if inst and inst.frame then
+        CL.ApplyLayout(id, inst.frame, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MAX_WINDOW_WIDTH, MAX_WINDOW_HEIGHT)
+    end
+end
+
+-- Shows one specific window by id, creating its frame if needed (same
+-- lazy-create as ShowInstance) - used by Options' per-window Hide/
+-- Grouped checkboxes to reveal a window immediately when a restriction
+-- is unchecked, without having to wait for (or fake) a combat/group
+-- transition event.
+function UI.ShowWindowById(id)
+    local inst = instances[id]
+    if inst then ShowInstance(inst) end
+end
+
+-- Called on PLAYER_REGEN_DISABLED (combat start) - shows every window
+-- with its own "Auto-show on combat start" option on. A window that
+-- also has "Only show while grouped" on is skipped here if you're not
+-- currently grouped (e.g. a Threat meter that should only ever appear
+-- for a real pull, not solo combat).
+function UI.ApplyAutoShow()
+    local id, inst
+    for id, inst in pairs(instances) do
+        if CL.GetWindowOption(id, "autoShowInCombat", true) then
+            if not CL.GetWindowOption(id, "onlyShowGrouped", false) or IsGrouped() then
+                ShowInstance(inst)
+            end
+        end
+    end
+end
+
+-- Called (only while out of combat - see Events.lua's own guard) to
+-- hide every window with its own "Auto-hide out of combat" option on.
+function UI.ApplyAutoHide()
+    local id, inst
+    for id, inst in pairs(instances) do
+        if CL.GetWindowOption(id, "autoHideOutOfCombat", false) and inst.frame then
+            inst.frame:Hide()
+        end
+    end
+end
+
+-- Called on any group roster change - a window with "Only show while
+-- grouped" hides immediately the moment you're no longer grouped, and
+-- shows immediately the moment you're grouped again, PROVIDED nothing
+-- else currently required is still missing - UI.IsSuppressedNow already
+-- encodes that combined rule (Grouped-only needs grouped, Auto-hide
+-- needs combat, independently of each other), so joining a group alone
+-- is enough to reveal a Grouped-only window that doesn't also have
+-- Auto-hide on, without waiting for combat to start - this used to
+-- hard-require being in combat unconditionally, which was wrong
+-- whenever Auto-hide wasn't checked (i.e. combat was never actually a
+-- requirement for that window in the first place).
+function UI.ReconcileGroupVisibility()
+    local id, inst
+    for id, inst in pairs(instances) do
+        if CL.GetWindowOption(id, "onlyShowGrouped", false) then
+            if not IsGrouped() then
+                if inst.frame then inst.frame:Hide() end
+            elseif CL.GetWindowOption(id, "autoShowInCombat", true) and not UI.IsSuppressedNow(id) then
+                ShowInstance(inst)
+            end
+        end
     end
 end
 
@@ -1426,10 +1679,29 @@ StaticPopupDialogs["COMBATLEDGER_RESET_OVERALL"] = {
     exclusive = 1,
 }
 
+StaticPopupDialogs["COMBATLEDGER_ANNOUNCE"] = {
+    text = "Post the top %d to chat?", -- %d filled in from StaticPopup_Show's text_arg1 (the announce count)
+    button1 = "Yes",
+    button2 = "No",
+    OnAccept = function()
+        if pendingAnnounceInst then
+            AnnounceTop(pendingAnnounceInst)
+            pendingAnnounceInst = nil
+        end
+    end,
+    OnCancel = function()
+        pendingAnnounceInst = nil
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+    exclusive = 1,
+}
+
 -- NOT called here at file-load time - this client restores the real
 -- CombatLedgerDB from disk AFTER all files finish executing, so
 -- CreateWindowFrame's CL.ApplyLayout would always read an empty
 -- placeholder and silently never restore the saved size/position (every
 -- reload, not just occasionally). Events.lua's first PLAYER_ENTERING_WORLD
--- calls UI.Show() (and UI.RestoreExtraWindows()) instead, once the real
--- saved data is actually there.
+-- calls UI.RestoreAllWindows() instead, once the real saved data is
+-- actually there.

@@ -15,7 +15,13 @@ local CL = CombatLedger
 local OPT = {}
 CL.UIOptions = OPT
 
-local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 522
+-- WINDOW_HEIGHT fits the Advanced tab's worst case (every row slot
+-- full - 3 NextY() lines each: name/close, show/hide/grouped toggles,
+-- mirror button) plus bottom padding - see the row-building loop below.
+-- RefreshOptionsWindow reflows resetPosBtn up to sit right after
+-- however many windows actually exist, so this is a ceiling, not what
+-- most people will actually see below their last row.
+local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 580
 local MAX_WINDOW_ROWS = 4 -- most people won't run more than 2-3 extra meter windows at once
 local ROW_HEIGHT = 24
 
@@ -177,6 +183,20 @@ local function CreateWindow()
         return y
     end
 
+    -- Thin separator line between sections - a plain colored header on
+    -- its own reads weakly at this compact size, easy to skim past.
+    -- Advances yOffset by less than a full row (this isn't a control,
+    -- it doesn't need one's worth of breathing room on both sides).
+    local function AddDivider(parent)
+        local line = parent:CreateTexture(nil, "ARTWORK")
+        line:SetTexture("Interface\\Buttons\\WHITE8X8")
+        line:SetVertexColor(1, 1, 1, 0.12)
+        line:SetHeight(1)
+        line:SetPoint("TOPLEFT", parent, "TOPLEFT", 14, -yOffset)
+        line:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -12, -yOffset)
+        yOffset = yOffset + 10
+    end
+
     -- Window behavior
     local lockLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     local y = NextY()
@@ -206,46 +226,12 @@ local function CreateWindow()
     end)
     f.minimapCB = minimapCB
 
-    local showCombatLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    y = NextY()
-    showCombatLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
-    showCombatLabel:SetText("Auto-show on combat start")
-    local showCombatCB = CreateFrame("CheckButton", "CombatLedgerShowCombatCB", pageGeneral, "UICheckButtonTemplate")
-    showCombatCB:SetWidth(20)
-    showCombatCB:SetHeight(20)
-    showCombatCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
-    showCombatCB:SetScript("OnClick", function()
-        CL.SetSetting("autoShowInCombat", (this:GetChecked() == 1))
-    end)
-    f.showCombatCB = showCombatCB
-
-    local hideCombatLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    y = NextY()
-    hideCombatLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
-    hideCombatLabel:SetText("Auto-hide out of combat")
-    local hideCombatCB = CreateFrame("CheckButton", "CombatLedgerHideCombatCB", pageGeneral, "UICheckButtonTemplate")
-    hideCombatCB:SetWidth(20)
-    hideCombatCB:SetHeight(20)
-    hideCombatCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
-    hideCombatCB:SetScript("OnClick", function()
-        local checked = (this:GetChecked() == 1)
-        CL.SetSetting("autoHideOutOfCombat", checked)
-        -- Take effect right away rather than waiting for the next
-        -- combat transition, which might not come for a while (or ever,
-        -- if you're already out of combat when you flip this either
-        -- way) - checking it hides now if out of combat; unchecking it
-        -- un-hides now if out of combat.
-        if CL.UI and not UnitAffectingCombat("player") then
-            if checked then
-                CL.UI.Hide()
-            else
-                CL.UI.Show()
-            end
-        end
-    end)
-    f.hideCombatCB = hideCombatCB
+    -- Auto-show/auto-hide used to be global checkboxes here - now
+    -- per-window (see the Windows section on the Advanced tab), since a
+    -- Threat meter and an always-on Damage meter want different rules.
 
     -- Appearance
+    AddDivider(pageGeneral)
     local appearanceHeader = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     y = NextY()
     appearanceHeader:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
@@ -269,38 +255,11 @@ local function CreateWindow()
     end
     f.matchPfuiCB = matchPfuiCB
 
-    local dockCB
-    if CL.HasPfui() then
-        local dockLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        y = NextY()
-        dockLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
-        dockLabel:SetText("Dock in pfUI chat panel")
-        dockCB = CreateFrame("CheckButton", "CombatLedgerPfuiDockCB", pageGeneral, "UICheckButtonTemplate")
-        dockCB:SetWidth(20)
-        dockCB:SetHeight(20)
-        dockCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
-        dockCB:SetScript("OnClick", function()
-            local checked = (this:GetChecked() == 1)
-            CL.SetSetting("pfuiDock", checked)
-            if checked then
-                if not CL.TryRegisterPfuiDock() and CL.UIWindows and CL.UIWindows["main"] and CL.UIWindows["main"].frame then
-                    -- Slot taken or pfUI's chat panel not ready yet - the
-                    -- delayed retry in UI_PfuiDock.lua will keep trying;
-                    -- TryRegisterPfuiDock already printed why if it failed
-                    -- for a reason worth telling the user about.
-                end
-            elseif CL.UndockFromPfui then
-                CL.UndockFromPfui()
-            end
-        end)
-        dockCB:SetScript("OnEnter", function()
-            GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
-            GameTooltip:SetText("Dock the main window into pfUI's right chat panel, toggled with the > button there - like TWThreat or other third-party meters.", nil, nil, nil, nil, true)
-            GameTooltip:Show()
-        end)
-        dockCB:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    end
-    f.dockCB = dockCB
+    -- "Dock in pfUI chat panel" removed for now - the dock never worked
+    -- reliably and isn't worth fixing right now. UI_PfuiDock.lua itself
+    -- is untouched (still there if this gets revisited later), just
+    -- unreachable from Options now - pfuiDock stays false forever with
+    -- no control to flip it.
 
     local textureLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     y = NextY()
@@ -356,6 +315,23 @@ local function CreateWindow()
         if CL.UI and CL.UI.Refresh then CL.UI.Refresh() end
     end)
     f.classIconCB = classIconCB
+
+    -- Header/dropdown buttons take the player's class color instead of
+    -- the flat near-black default - independent of the class icon above
+    -- (this is chrome/border color, not an icon).
+    local classColorLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    classColorLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    classColorLabel:SetText("Class colored menus")
+    local classColorCB = CreateFrame("CheckButton", "CombatLedgerClassColorCB", pageGeneral, "UICheckButtonTemplate")
+    classColorCB:SetWidth(20)
+    classColorCB:SetHeight(20)
+    classColorCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+    classColorCB:SetScript("OnClick", function()
+        CL.SetSetting("classColorMenus", (this:GetChecked() == 1))
+        CL.FireAppearanceChanged()
+    end)
+    f.classColorCB = classColorCB
 
     local fontLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     y = NextY()
@@ -468,6 +444,7 @@ local function CreateWindow()
     f.opacityStepper = opacityStepper
 
     -- Bar animation
+    AddDivider(pageGeneral)
     local animHeader = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     y = NextY()
     animHeader:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
@@ -585,6 +562,7 @@ local function CreateWindow()
     -- in one window while Damage sits in another. Fixed-size row pool
     -- (MAX_WINDOW_ROWS) like the rest of this window's fixed layout,
     -- not a scroll list - refreshed from CL.UI.GetWindowList() below.
+    AddDivider(pageAdvanced)
     local windowsHeader = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     y = NextY()
     windowsHeader:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
@@ -601,24 +579,72 @@ local function CreateWindow()
     end)
     f.newWindowBtn = newWindowBtn
 
+    -- Each row is three lines now: name + close button on top, this
+    -- window's own auto-show/auto-hide/grouped-only toggles below that,
+    -- then a "Mirror Main" button (extra windows only - a one-time copy
+    -- of Main's current size/position, not a persistent link) - takes
+    -- three NextY() slots' worth of vertical space per row instead of
+    -- one (see the matching WINDOW_HEIGHT bump).
+    -- Captured so RefreshOptionsWindow can reflow resetPosBtn to sit
+    -- right after however many windows actually exist right now,
+    -- instead of always leaving room for the full MAX_WINDOW_ROWS - most
+    -- people only run 1-2 extra windows, so the fixed layout used to
+    -- leave a big dead gap between the last real row and everything
+    -- below it.
+    local windowRowsStartY = yOffset
+    local ROW_SLOT_HEIGHT = 3 * ROW_HEIGHT
+    f.windowRowsStartY = windowRowsStartY
+    f.rowSlotHeight = ROW_SLOT_HEIGHT
+
     f.windowRows = {}
     local wi
     for wi = 1, MAX_WINDOW_ROWS do
         y = NextY()
+        NextY()
+        NextY()
         local row = CreateFrame("Frame", nil, pageAdvanced)
         row:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
         row:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y)
-        row:SetHeight(18)
+        row:SetHeight(3 * ROW_HEIGHT - 4)
 
         local rowLabel = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        rowLabel:SetPoint("LEFT", row, "LEFT", 0, 0)
-        rowLabel:SetPoint("RIGHT", row, "RIGHT", -20, 0)
+        rowLabel:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
+        rowLabel:SetPoint("TOPRIGHT", row, "TOPRIGHT", -20, 0)
         rowLabel:SetJustifyH("LEFT")
         row.rowLabel = rowLabel
 
         local rowCloseBtn = CreateSmallButton(row, 16, "X")
-        rowCloseBtn:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+        rowCloseBtn:SetPoint("TOPRIGHT", row, "TOPRIGHT", 0, 0)
         row.rowCloseBtn = rowCloseBtn
+
+        -- Compact checkbox+label pairs, left to right - "Show" (auto-
+        -- show on combat start), "Hide" (auto-hide out of combat),
+        -- "Grouped" (only show while in a party/raid). The labels alone
+        -- don't say enough at this size, so each gets a hover tooltip
+        -- spelling out exactly what it does.
+        local function CreateRowToggle(labelText, tooltip, xOffset)
+            local cb = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+            cb:SetWidth(16)
+            cb:SetHeight(16)
+            cb:SetPoint("TOPLEFT", row, "TOPLEFT", xOffset, -20)
+            local label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            label:SetPoint("LEFT", cb, "RIGHT", 2, 0)
+            label:SetText(labelText)
+            cb:SetScript("OnEnter", function()
+                GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                GameTooltip:SetText(tooltip, nil, nil, nil, nil, true)
+                GameTooltip:Show()
+            end)
+            cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            return cb
+        end
+        row.showCB = CreateRowToggle("Auto-show", "Auto-show this window the moment combat starts.", 0)
+        row.hideCB = CreateRowToggle("Auto-hide", "Auto-hide this window the moment combat ends.", 92)
+        row.groupCB = CreateRowToggle("Grouped only", "Only ever auto-show this window while you're in a party or raid - hides it immediately if you leave group, even mid-combat.", 186)
+
+        local mirrorBtn = CreateSmallButton(row, WINDOW_WIDTH - 26, "Mirror Main (size/position)")
+        mirrorBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -40)
+        row.mirrorBtn = mirrorBtn
 
         f.windowRows[wi] = row
     end
@@ -641,8 +667,9 @@ local function CreateWindow()
             pfUI.api.SkinCloseButton(closeBtn)
             pfUI.api.SkinCheckbox(lockCB)
             pfUI.api.SkinCheckbox(minimapCB)
-            pfUI.api.SkinCheckbox(showCombatCB)
-            pfUI.api.SkinCheckbox(hideCombatCB)
+            pfUI.api.SkinCheckbox(hideBorderCB)
+            pfUI.api.SkinCheckbox(classIconCB)
+            pfUI.api.SkinCheckbox(classColorCB)
             pfUI.api.SkinCheckbox(smoothCB)
             pfUI.api.SkinCheckbox(testCB)
             pfUI.api.SkinCheckbox(announcePullsCB)
@@ -657,6 +684,10 @@ local function CreateWindow()
             local wi
             for wi = 1, table.getn(f.windowRows) do
                 pfUI.api.SkinButton(f.windowRows[wi].rowCloseBtn)
+                pfUI.api.SkinButton(f.windowRows[wi].mirrorBtn)
+                pfUI.api.SkinCheckbox(f.windowRows[wi].showCB)
+                pfUI.api.SkinCheckbox(f.windowRows[wi].hideCB)
+                pfUI.api.SkinCheckbox(f.windowRows[wi].groupCB)
             end
             pfUI.api.SkinButton(fontSizeStepper.minus)
             pfUI.api.SkinButton(fontSizeStepper.plus)
@@ -691,13 +722,8 @@ RefreshOptionsWindow = function()
 
     window.lockCB:SetChecked(CL.GetSetting("lockWindow"))
     window.minimapCB:SetChecked(CL.GetSetting("showMinimapButton") ~= false)
-    window.showCombatCB:SetChecked(CL.GetSetting("autoShowInCombat") ~= false)
-    window.hideCombatCB:SetChecked(CL.GetSetting("autoHideOutOfCombat"))
     if window.matchPfuiCB then
         window.matchPfuiCB:SetChecked(CL.IsMatchPfui())
-    end
-    if window.dockCB then
-        window.dockCB:SetChecked(CL.GetSetting("pfuiDock"))
     end
 
     -- " |cff999999v|r" suffix marks these as dropdowns (click opens a
@@ -706,6 +732,7 @@ RefreshOptionsWindow = function()
     window.textureBtn.label:SetText(LabelForKey(CL.GetAvailableBarTextures(), CL.GetSetting("barTexture") or "flat") .. " |cff999999v|r")
     window.hideBorderCB:SetChecked(CL.GetSetting("hideBorder"))
     window.classIconCB:SetChecked(CL.GetSetting("showClassIcon"))
+    window.classColorCB:SetChecked(CL.GetSetting("classColorMenus"))
     window.fontBtn.label:SetText(LabelForKey(CL.FONTS, CL.GetSetting("fontKey") or "friz") .. " |cff999999v|r")
     window.fontSizeStepper.value:SetText(tostring(CL.GetSetting("fontSize") or 10))
     local barHeight = CL.GetSetting("barHeight")
@@ -736,23 +763,87 @@ RefreshOptionsWindow = function()
             local row = window.windowRows[wi]
             local entry = list[wi]
             if entry then
+                local id = entry.id
                 row.rowLabel:SetText(entry.label .. (entry.closable and "" or " |cff888888(Main)|r"))
                 if entry.closable then
                     row.rowCloseBtn:Show()
-                    local id = entry.id
                     row.rowCloseBtn:SetScript("OnClick", function()
                         if CL.UI and CL.UI.CloseExtraWindow then
                             CL.UI.CloseExtraWindow(id)
                             RefreshOptionsWindow()
                         end
                     end)
+                    row.mirrorBtn:Show()
+                    row.mirrorBtn:SetScript("OnClick", function()
+                        if CL.UI and CL.UI.MirrorMainLayout then
+                            CL.UI.MirrorMainLayout(id)
+                        end
+                    end)
                 else
                     row.rowCloseBtn:Hide()
+                    row.mirrorBtn:Hide()
                 end
+
+                row.showCB:SetChecked(CL.GetWindowOption(id, "autoShowInCombat", true))
+                row.showCB:SetScript("OnClick", function()
+                    CL.SetWindowOption(id, "autoShowInCombat", (this:GetChecked() == 1))
+                end)
+
+                row.hideCB:SetChecked(CL.GetWindowOption(id, "autoHideOutOfCombat", false))
+                row.hideCB:SetScript("OnClick", function()
+                    local checked = (this:GetChecked() == 1)
+                    CL.SetWindowOption(id, "autoHideOutOfCombat", checked)
+                    -- Take effect right away rather than waiting for the
+                    -- next combat transition, which might not come for a
+                    -- while (or ever, if already out of combat) - checking
+                    -- it hides now if out of combat; unchecking it
+                    -- un-hides now UNLESS Grouped-only is also on and
+                    -- you're not grouped, in which case that rule still
+                    -- says this window shouldn't be up (IsSuppressedNow
+                    -- checks both rules together, not just this one).
+                    if CL.UI and not UnitAffectingCombat("player") then
+                        if checked and CL.UI.ApplyAutoHide then
+                            CL.UI.ApplyAutoHide()
+                        elseif not checked and CL.UI.ShowWindowById and CL.UI.IsSuppressedNow
+                            and not CL.UI.IsSuppressedNow(id) then
+                            CL.UI.ShowWindowById(id)
+                        end
+                    end
+                end)
+
+                row.groupCB:SetChecked(CL.GetWindowOption(id, "onlyShowGrouped", false))
+                row.groupCB:SetScript("OnClick", function()
+                    local checked = (this:GetChecked() == 1)
+                    CL.SetWindowOption(id, "onlyShowGrouped", checked)
+                    if CL.UI then
+                        if checked and CL.UI.ReconcileGroupVisibility then
+                            CL.UI.ReconcileGroupVisibility()
+                        elseif not checked and CL.UI.ShowWindowById and CL.UI.IsSuppressedNow
+                            and not CL.UI.IsSuppressedNow(id) then
+                            -- Same reasoning as Auto-hide above - lifting
+                            -- this restriction should reveal the window
+                            -- now UNLESS Auto-hide is also on and you're
+                            -- out of combat, which still says it should
+                            -- stay hidden.
+                            CL.UI.ShowWindowById(id)
+                        end
+                    end
+                end)
+
                 row:Show()
             else
                 row:Hide()
             end
+        end
+
+        -- Reflow resetPosBtn to sit right after however many rows are
+        -- actually populated (table.getn(list)), not the full
+        -- MAX_WINDOW_ROWS worth of reserved space.
+        if window.resetPosBtn and window.windowRowsStartY and window.rowSlotHeight then
+            local n = table.getn(list)
+            window.resetPosBtn:ClearAllPoints()
+            window.resetPosBtn:SetPoint("TOPLEFT", window, "TOPLEFT", 14,
+                -(window.windowRowsStartY + n * window.rowSlotHeight + 6))
         end
     end
 end

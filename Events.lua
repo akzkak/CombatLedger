@@ -268,8 +268,8 @@ local function FinishEncounter()
     -- disabled). Only auto-hide when genuinely out of combat, or the
     -- window can hide itself mid-fight with nothing left to re-show it
     -- until the next real PLAYER_REGEN_DISABLED.
-    if CL.GetSetting("autoHideOutOfCombat") and CL.UI and not UnitAffectingCombat("player") then
-        CL.UI.Hide()
+    if CL.UI and CL.UI.ApplyAutoHide and not UnitAffectingCombat("player") then
+        CL.UI.ApplyAutoHide()
     end
 
     if CL.debug then
@@ -332,9 +332,8 @@ f:SetScript("OnEvent", function()
             if CL.Aggregator.GetCurrent() then
                 TouchActivity()
             end
-            if CL.UI then
-                CL.UI.Show()
-                CL.UI.RestoreExtraWindows()
+            if CL.UI and CL.UI.RestoreAllWindows then
+                CL.UI.RestoreAllWindows()
             end
             -- Same timing issue as UI.Show() above - the minimap button
             -- is created at file-load time (before real SavedVariables
@@ -353,6 +352,12 @@ f:SetScript("OnEvent", function()
         -- refresh on party/raid change alone misses a pet that appears
         -- or disappears without the group composition itself changing.
         CL.GuidCache.RefreshRoster()
+        if (event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE") and CL.UI and CL.UI.ReconcileGroupVisibility then
+            -- Only the two real group-composition events, not UNIT_PET -
+            -- a pet appearing/disappearing doesn't change whether the
+            -- player is grouped, which is all this checks.
+            CL.UI.ReconcileGroupVisibility()
+        end
         return
     end
 
@@ -372,8 +377,8 @@ f:SetScript("OnEvent", function()
         pendingGroupFinish = false
         TouchActivity()
         CL.Aggregator.StartEncounter()
-        if CL.GetSetting("autoShowInCombat") ~= false and CL.UI then
-            CL.UI.Show()
+        if CL.UI and CL.UI.ApplyAutoShow then
+            CL.UI.ApplyAutoShow()
         end
         return
     end

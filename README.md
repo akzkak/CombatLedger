@@ -9,16 +9,6 @@ A combat meter for 1.12 WoW, built on [Nampower](https://github.com/namreeb/namp
       <sub><b>Main window</b> — Damage Done</sub>
     </td>
     <td align="center" width="50%">
-      <img src="screenshots/options.png" width="260"><br>
-      <sub><b>Options</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="50%">
-      <img src="screenshots/threat-multiwindow.png" width="260"><br>
-      <sub><b>Threat mode</b> alongside a second window, each independent</sub>
-    </td>
-    <td align="center" width="50%">
       <img src="screenshots/breakdown.png" width="260"><br>
       <sub>Click any bar for a full <b>per-ability, per-target breakdown</b></sub>
     </td>
@@ -43,7 +33,9 @@ CombatLedger instead listens to Nampower's own combat events — `AUTO_ATTACK_SE
 - **Deaths** — with a hit-by-hit recap of exactly what killed each tracked unit, built from a rolling combat buffer rather than a single killing-blow line.
 - **Threat** — a live per-target threat display sourced from the server's own `UnitDetailedThreatSituation` addon-message API, including a "pull aggro at" reference line showing exactly how much more threat you can generate before you pull off the current target.
 
-Every mode has **Current Fight**, session-long **Overall**, and a scrollable **History** of past encounters, independently switchable per window. You can run as many meter windows as you want at once, each with its own mode, segment, size, and position — track Damage in one and Healing in another simultaneously.
+Every mode has **Current Fight**, session-long **Overall**, and a scrollable **History** of past encounters (kept separately per character, not shared across your account), independently switchable per window. You can run as many meter windows as you want at once, each with its own mode, segment, size, and position — track Damage in one and Healing in another simultaneously.
+
+Each window also has its own **Auto-show**, **Auto-hide**, and **Grouped only** rules, managed from Options' Windows list — so a Threat meter can stay hidden until you're grouped *and* in combat, while your Damage meter just stays up all the time. A "Mirror Main" button on each extra window copies Main's current size/position over in one click.
 
 CombatLedger also announces **who pulled** a boss/elite encounter and with what ability, straight to chat — toggleable in Options.
 
@@ -62,7 +54,7 @@ Drop the `CombatLedger` folder into your `Interface/AddOns` directory, alongside
 - `/cl options` — lock/minimap/appearance settings, and window management.
 - `/cl history` — the saved-encounters list.
 - Click any bar to open its per-ability, per-target breakdown.
-- Right-click the minimap icon (or the meter window's Options button) for everything else.
+- Right-click the minimap icon for everything else.
 
 ## Roadmap
 
