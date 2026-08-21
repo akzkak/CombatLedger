@@ -489,6 +489,7 @@ end)
 -- throttles it to roughly once a second instead, using the same
 -- OnUpdate the end-of-encounter checks below already run on.
 local flushAccum = 0
+local idleSuppressedLogged = false
 f:SetScript("OnUpdate", function()
     if pendingGroupFinish and not AnyGroupMemberInCombat() then
         pendingGroupFinish = false
@@ -515,7 +516,34 @@ f:SetScript("OnUpdate", function()
     end
 
     if CL.Aggregator.GetCurrent() and lastEventTime > 0 and (GetTime() - lastEventTime) > CL.IDLE_SECONDS then
-        FinishEncounter()
+        -- This fallback exists for targets that never toggle regen at
+        -- all (training dummies) - solo, that's the only way an
+        -- encounter against one would ever end. But in a group, a local
+        -- lull in events the player happens to be involved in doesn't
+        -- mean the raid stopped fighting (e.g. a healer standing off to
+        -- the side of a melee pack can easily see 12+ quiet seconds of
+        -- its own). Same guard as the regen path: don't let this fire
+        -- while someone else in the group is still actually in combat,
+        -- or this ends the encounter and Aggregator.lua's lazy
+        -- "if not current then StartEncounter()" immediately spins up a
+        -- new one on the very next raid-wide event, fragmenting one
+        -- continuous pull into several.
+        local grouped = ((GetNumRaidMembers and GetNumRaidMembers()) or 0) > 0
+            or ((GetNumPartyMembers and GetNumPartyMembers()) or 0) > 0
+        if not grouped or not AnyGroupMemberInCombat() then
+            if CL.debug and grouped and idleSuppressedLogged then
+                CL.LogLine("[REGEN] idle-timeout finishing - group also clear")
+            end
+            idleSuppressedLogged = false
+            FinishEncounter()
+        else
+            if CL.debug and not idleSuppressedLogged then
+                CL.LogLine("[REGEN] idle-timeout suppressed - group still in combat")
+            end
+            idleSuppressedLogged = true
+        end
+    else
+        idleSuppressedLogged = false
     end
 end)
 

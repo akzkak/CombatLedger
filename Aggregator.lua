@@ -247,7 +247,43 @@ local function StartEncounter()
     if current then return end
     current = NewEncounter()
     lastFinished = nil -- a new fight is live - stop showing the frozen previous one
-    if CL.debug then CL.Print("Encounter started.") end
+    if CL.debug then
+        CL.Print("Encounter started.")
+        CL.LogLine("[REGEN] StartEncounter (lazy-start guard passed or real PLAYER_REGEN_DISABLED)")
+    end
+end
+
+-- Guards every Record* function's lazy "if not current then
+-- StartEncounter()" below - without this, a stray post-combat event
+-- (a HoT finishing its last tick, a top-off heal, a mana-regen tick
+-- from resting/drinking) spins up a brand new encounter out of thin
+-- air the moment the real fight's encounter has already ended, purely
+-- because something still called Record* after current went nil. That
+-- phantom encounter then just sits there with near-zero real data
+-- until the idle timeout eventually kills it, showing up in History as
+-- an empty "fight" nobody actually had. Checking player-or-group
+-- combat state first means a stray heal tick with nobody actually
+-- fighting anything just doesn't get recorded into a new encounter at
+-- all - correct, since it isn't part of a fight.
+local function AnyoneInCombat()
+    local okP, playerCombat = pcall(UnitAffectingCombat, "player")
+    if okP and playerCombat then return true end
+    local raidN = (GetNumRaidMembers and GetNumRaidMembers()) or 0
+    local partyN = (GetNumPartyMembers and GetNumPartyMembers()) or 0
+    local i
+    if raidN > 0 then
+        for i = 1, raidN do
+            local ok, inCombat = pcall(UnitAffectingCombat, "raid" .. i)
+            if ok and inCombat then return true end
+        end
+    end
+    if partyN > 0 then
+        for i = 1, partyN do
+            local ok, inCombat = pcall(UnitAffectingCombat, "party" .. i)
+            if ok and inCombat then return true end
+        end
+    end
+    return false
 end
 
 local function GetCurrent()
@@ -488,7 +524,10 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
 end
 
 local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
-    if not current then StartEncounter() end
+    if not current then
+        if not AnyoneInCombat() then return end
+        StartEncounter()
+    end
 
     -- Pull attribution: whoever's action is the first damage event
     -- against/from a boss-tagged enemy this encounter "pulled" it - set
@@ -594,7 +633,10 @@ end
 -- routed through RecordDamage since amount is always 0 here; still
 -- writes into both current and overall like every other Record* call.
 local function RecordAvoidance(casterGuid, targetGuid, victimState, isOffhand)
-    if not current then StartEncounter() end
+    if not current then
+        if not AnyoneInCombat() then return end
+        StartEncounter()
+    end
     local key = VICTIMSTATE_KEY[victimState] or "other"
     RecordAvoidanceInto(current.units, casterGuid, targetGuid, key, isOffhand)
     RecordAvoidanceInto(overall.units, casterGuid, targetGuid, key, isOffhand)
@@ -624,7 +666,10 @@ local function RecordHealingInto(units, casterGuid, targetGuid, spellId, spellNa
 end
 
 local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
-    if not current then StartEncounter() end
+    if not current then
+        if not AnyoneInCombat() then return end
+        StartEncounter()
+    end
     RecordHealingInto(current.units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
     RecordHealingInto(overall.units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
 
@@ -662,19 +707,28 @@ local function RecordCountEventInto(units, bucketKey, casterGuid, targetGuid, sp
 end
 
 local function RecordCleanse(casterGuid, targetGuid, spellId, spellName)
-    if not current then StartEncounter() end
+    if not current then
+        if not AnyoneInCombat() then return end
+        StartEncounter()
+    end
     RecordCountEventInto(current.units, "cleanses", casterGuid, targetGuid, spellId, spellName)
     RecordCountEventInto(overall.units, "cleanses", casterGuid, targetGuid, spellId, spellName)
 end
 
 local function RecordDebuffGiven(casterGuid, targetGuid, spellId, spellName)
-    if not current then StartEncounter() end
+    if not current then
+        if not AnyoneInCombat() then return end
+        StartEncounter()
+    end
     RecordCountEventInto(current.units, "debuffsGiven", casterGuid, targetGuid, spellId, spellName)
     RecordCountEventInto(overall.units, "debuffsGiven", casterGuid, targetGuid, spellId, spellName)
 end
 
 local function RecordInterrupt(casterGuid, targetGuid, spellId, spellName)
-    if not current then StartEncounter() end
+    if not current then
+        if not AnyoneInCombat() then return end
+        StartEncounter()
+    end
     RecordCountEventInto(current.units, "interrupts", casterGuid, targetGuid, spellId, spellName)
     RecordCountEventInto(overall.units, "interrupts", casterGuid, targetGuid, spellId, spellName)
 end
