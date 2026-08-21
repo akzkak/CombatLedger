@@ -435,12 +435,18 @@ local function CreateBar(inst, parent, index)
     bg:SetVertexColor(0.15, 0.15, 0.15, 0.85)
     bar.bg = bg
 
-    local nameText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
-    nameText:SetJustifyH("LEFT")
-    nameText:SetText("")
-    CL.ApplyFont(nameText, CL.GetFontSize())
-    bar.nameText = nameText
+    -- Class icon slot - off by default (Options: "Show class icon"),
+    -- hidden and unanchored until RefreshInstance decides per-refresh
+    -- whether to show it. When it's off, nameText sits exactly where it
+    -- always has (bar:LEFT+4) - no permanently-reserved gap for people
+    -- who never turn this on.
+    local classIcon = bar:CreateTexture(nil, "OVERLAY")
+    classIcon:SetWidth(height - 4)
+    classIcon:SetHeight(height - 4)
+    classIcon:SetPoint("LEFT", bar, "LEFT", 3, 0)
+    classIcon:SetTexture("Interface\\TargetingFrame\\UI-Classes-Circle")
+    classIcon:Hide()
+    bar.classIcon = classIcon
 
     local valueText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     valueText:SetPoint("RIGHT", bar, "RIGHT", -4, 0)
@@ -448,6 +454,20 @@ local function CreateBar(inst, parent, index)
     valueText:SetText("")
     CL.ApplyFont(valueText, CL.GetFontSize())
     bar.valueText = valueText
+
+    -- LEFT anchor is re-set every refresh (see RefreshInstance) based on
+    -- whether the class icon is actually showing for this entry - starts
+    -- at the same bar:LEFT+4 as always here. RIGHT is bounded to
+    -- valueText (was unbounded) - an unbounded name could run straight
+    -- into it once both were long enough. Created after valueText so it
+    -- can anchor off it.
+    local nameText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
+    nameText:SetPoint("RIGHT", valueText, "LEFT", -4, 0)
+    nameText:SetJustifyH("LEFT")
+    nameText:SetText("")
+    CL.ApplyFont(nameText, CL.GetFontSize())
+    bar.nameText = nameText
 
     bar:EnableMouse(true)
     bar:SetScript("OnMouseUp", function()
@@ -691,7 +711,8 @@ local function CreateWindowFrame(inst)
     local themeR, themeG, themeB, themeHex = CL.GetThemeColor()
     f:SetBackdropColor(0, 0, 0, CL.GetBackdropAlpha(0.8))
     f:SetBackdropBorderColor(themeR, themeG, themeB, 1)
-    f:SetFrameStrata("MEDIUM")
+    f:SetFrameStrata("TOOLTIP") -- highest strata - a live meter shouldn't be able to end up hidden behind something else
+    f:SetClampedToScreen(true) -- can't be dragged/pushed off-screen, unlike before
     f:SetMovable(true)
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
@@ -1062,6 +1083,23 @@ RefreshInstance = function(inst)
                     bar.valueText:SetText(FormatNumber(entry.total) .. "  (" .. FormatNumber(rate) .. ")")
                 end
             end
+
+            -- Class icon - opt-in (Options: "Show class icon"), and
+            -- only for entries that resolved a real class (not the
+            -- aggro-marker reference row, and not mobs/unresolved
+            -- units, which have no classToken at all). SetPoint on the
+            -- same anchor point ("LEFT") replaces the previous one, so
+            -- this doesn't need a ClearAllPoints first.
+            if not entry.isAgroMarker and CL.GetSetting("showClassIcon") and entry.classToken and CL.CLASS_ICON_TCOORDS[entry.classToken] then
+                local coords = CL.CLASS_ICON_TCOORDS[entry.classToken]
+                bar.classIcon:SetTexCoord(coords[1], coords[2], coords[3], coords[4])
+                bar.classIcon:Show()
+                bar.nameText:SetPoint("LEFT", bar.classIcon, "RIGHT", 3, 0)
+            else
+                bar.classIcon:Hide()
+                bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
+            end
+
             bar.guid = entry.guid
             bar:Show()
         else

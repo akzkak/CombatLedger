@@ -15,7 +15,7 @@ local CL = CombatLedger
 local OPT = {}
 CL.UIOptions = OPT
 
-local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 474
+local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 522
 local MAX_WINDOW_ROWS = 4 -- most people won't run more than 2-3 extra meter windows at once
 local ROW_HEIGHT = 24
 
@@ -114,6 +114,7 @@ local function CreateWindow()
     local themeR, themeG, themeB, themeHex = CL.GetThemeColor()
     f:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)
     f:SetFrameStrata("DIALOG")
+    f:SetClampedToScreen(true)
     f:SetMovable(true)
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
@@ -268,6 +269,39 @@ local function CreateWindow()
     end
     f.matchPfuiCB = matchPfuiCB
 
+    local dockCB
+    if CL.HasPfui() then
+        local dockLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        y = NextY()
+        dockLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+        dockLabel:SetText("Dock in pfUI chat panel")
+        dockCB = CreateFrame("CheckButton", "CombatLedgerPfuiDockCB", pageGeneral, "UICheckButtonTemplate")
+        dockCB:SetWidth(20)
+        dockCB:SetHeight(20)
+        dockCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+        dockCB:SetScript("OnClick", function()
+            local checked = (this:GetChecked() == 1)
+            CL.SetSetting("pfuiDock", checked)
+            if checked then
+                if not CL.TryRegisterPfuiDock() and CL.UIWindows and CL.UIWindows["main"] and CL.UIWindows["main"].frame then
+                    -- Slot taken or pfUI's chat panel not ready yet - the
+                    -- delayed retry in UI_PfuiDock.lua will keep trying;
+                    -- TryRegisterPfuiDock already printed why if it failed
+                    -- for a reason worth telling the user about.
+                end
+            elseif CL.UndockFromPfui then
+                CL.UndockFromPfui()
+            end
+        end)
+        dockCB:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Dock the main window into pfUI's right chat panel, toggled with the > button there - like TWThreat or other third-party meters.", nil, nil, nil, nil, true)
+            GameTooltip:Show()
+        end)
+        dockCB:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    end
+    f.dockCB = dockCB
+
     local textureLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     y = NextY()
     textureLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
@@ -305,6 +339,23 @@ local function CreateWindow()
         CL.FireAppearanceChanged()
     end)
     f.hideBorderCB = hideBorderCB
+
+    -- Class icon before the name on each bar - separate from bar fill
+    -- color (which is already class-colored), just an extra visual cue
+    -- some people want and others find redundant, hence opt-in.
+    local classIconLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    classIconLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    classIconLabel:SetText("Show class icon")
+    local classIconCB = CreateFrame("CheckButton", "CombatLedgerClassIconCB", pageGeneral, "UICheckButtonTemplate")
+    classIconCB:SetWidth(20)
+    classIconCB:SetHeight(20)
+    classIconCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+    classIconCB:SetScript("OnClick", function()
+        CL.SetSetting("showClassIcon", (this:GetChecked() == 1))
+        if CL.UI and CL.UI.Refresh then CL.UI.Refresh() end
+    end)
+    f.classIconCB = classIconCB
 
     local fontLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     y = NextY()
@@ -645,12 +696,16 @@ RefreshOptionsWindow = function()
     if window.matchPfuiCB then
         window.matchPfuiCB:SetChecked(CL.IsMatchPfui())
     end
+    if window.dockCB then
+        window.dockCB:SetChecked(CL.GetSetting("pfuiDock"))
+    end
 
     -- " |cff999999v|r" suffix marks these as dropdowns (click opens a
     -- list via CL.ShowDropdown) rather than the cycle-on-click buttons
     -- they used to be, which wasn't obvious from a plain value label.
     window.textureBtn.label:SetText(LabelForKey(CL.GetAvailableBarTextures(), CL.GetSetting("barTexture") or "flat") .. " |cff999999v|r")
     window.hideBorderCB:SetChecked(CL.GetSetting("hideBorder"))
+    window.classIconCB:SetChecked(CL.GetSetting("showClassIcon"))
     window.fontBtn.label:SetText(LabelForKey(CL.FONTS, CL.GetSetting("fontKey") or "friz") .. " |cff999999v|r")
     window.fontSizeStepper.value:SetText(tostring(CL.GetSetting("fontSize") or 10))
     local barHeight = CL.GetSetting("barHeight")

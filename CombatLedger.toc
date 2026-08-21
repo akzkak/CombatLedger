@@ -13,6 +13,7 @@ Threat.lua
 Events.lua
 History.lua
 UI_MainWindow.lua
+UI_PfuiDock.lua
 UI_BreakdownWindow.lua
 UI_DeathRecap.lua
 UI_HistoryWindow.lua

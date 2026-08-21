@@ -39,6 +39,7 @@ end
 
 local DETAIL_ROW_HEIGHT = 14
 local MAX_DETAIL_ROWS = 14
+local DETAIL_ICON_SIZE = 32 -- the "nice big" spell icon next to the selected ability's name
 
 local WINDOW_WIDTH, WINDOW_HEIGHT = 460, 320
 local MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT = 360, 240
@@ -247,19 +248,24 @@ local function CreateBar(parent, index)
     icon:Hide()
     bar.icon = icon
 
-    local nameText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    nameText:SetPoint("LEFT", icon, "RIGHT", 3, 0)
-    nameText:SetJustifyH("LEFT")
-    nameText:SetText("")
-    CL.ApplyFont(nameText, CL.GetFontSize())
-    bar.nameText = nameText
-
     local valueText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     valueText:SetPoint("RIGHT", bar, "RIGHT", -4, 0)
     valueText:SetJustifyH("RIGHT")
     valueText:SetText("")
     CL.ApplyFont(valueText, CL.GetFontSize())
     bar.valueText = valueText
+
+    -- Bounded on both sides (was LEFT-only) - an unbounded name string
+    -- (e.g. "Mind Flay") ran straight into the value/stats text (e.g.
+    -- "439 (4h, 0% crit)") once both were long enough. Created after
+    -- valueText so it can anchor its right edge off it.
+    local nameText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    nameText:SetPoint("LEFT", icon, "RIGHT", 3, 0)
+    nameText:SetPoint("RIGHT", valueText, "LEFT", -4, 0)
+    nameText:SetJustifyH("LEFT")
+    nameText:SetText("")
+    CL.ApplyFont(nameText, CL.GetFontSize())
+    bar.nameText = nameText
 
     bar:EnableMouse(true)
     bar:SetScript("OnMouseUp", function()
@@ -280,17 +286,20 @@ local function CreateTargetBar(parent, index)
     -- here, since the "All Enemies" row bumps every target down one
     -- slot whenever it's shown.
 
-    local nameText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    nameText:SetPoint("LEFT", bar, "LEFT", 2, 0)
-    nameText:SetJustifyH("LEFT")
-    CL.ApplyFont(nameText, CL.GetFontSize())
-    bar.nameText = nameText
-
     local valueText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     valueText:SetPoint("RIGHT", bar, "RIGHT", -2, 0)
     valueText:SetJustifyH("RIGHT")
     CL.ApplyFont(valueText, CL.GetFontSize())
     bar.valueText = valueText
+
+    -- Bounded on both sides (was LEFT-only) - see CreateBar's nameText
+    -- for why. Created after valueText so it can anchor off it.
+    local nameText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    nameText:SetPoint("LEFT", bar, "LEFT", 2, 0)
+    nameText:SetPoint("RIGHT", valueText, "LEFT", -4, 0)
+    nameText:SetJustifyH("LEFT")
+    CL.ApplyFont(nameText, CL.GetFontSize())
+    bar.nameText = nameText
 
     bar:EnableMouse(true)
     bar:SetScript("OnMouseUp", function()
@@ -337,16 +346,37 @@ local function GetDetailRow(parent, index)
         row:SetHeight(DETAIL_ROW_HEIGHT)
         row:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, -((index - 1) * DETAIL_ROW_HEIGHT))
         row:SetPoint("TOPRIGHT", parent, "TOPRIGHT", 0, -((index - 1) * DETAIL_ROW_HEIGHT))
-        local left = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        left:SetPoint("LEFT", row, "LEFT", 0, 0)
-        left:SetJustifyH("LEFT")
-        CL.ApplyFont(left, CL.GetFontSize())
-        row.left = left
         local right = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         right:SetPoint("RIGHT", row, "RIGHT", 0, 0)
         right:SetJustifyH("RIGHT")
         CL.ApplyFont(right, CL.GetFontSize())
         row.right = right
+
+        -- Icon slot - only ever shown for the "Top Ability" row (see
+        -- Line()'s optional icon param below), hidden/no-op for every
+        -- other label/value row this same row template backs (Total,
+        -- Rate, Hits, ...). Space is reserved unconditionally (left text
+        -- always anchors off it) rather than only when shown, so a row
+        -- with an icon doesn't sit at a different text x-offset than one
+        -- without.
+        local icon = row:CreateTexture(nil, "OVERLAY")
+        icon:SetWidth(DETAIL_ROW_HEIGHT - 2)
+        icon:SetHeight(DETAIL_ROW_HEIGHT - 2)
+        icon:SetPoint("LEFT", row, "LEFT", 0, 0)
+        icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        icon:Hide()
+        row.icon = icon
+
+        -- Bounded on both sides (was LEFT-only) - an unbounded name
+        -- string just overlapped straight into the value/stats text
+        -- once it was long enough (e.g. "Mind Flay" + "(4h, 0% crit)").
+        -- Created after `right` so it can anchor off it.
+        local left = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        left:SetPoint("LEFT", icon, "RIGHT", 3, 0)
+        left:SetPoint("RIGHT", right, "LEFT", -4, 0)
+        left:SetJustifyH("LEFT")
+        CL.ApplyFont(left, CL.GetFontSize())
+        row.left = left
         detailRows[index] = row
     end
     return row
@@ -362,6 +392,7 @@ local function CreateWindow()
     f:SetBackdropColor(0, 0, 0, CL.GetBackdropAlpha(0.8))
     f:SetBackdropBorderColor(themeR, themeG, themeB, 1)
     f:SetFrameStrata("MEDIUM")
+    f:SetClampedToScreen(true)
     f:SetMovable(true)
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
@@ -485,6 +516,20 @@ local function CreateWindow()
     divider:SetPoint("BOTTOM", f, "BOTTOM", 0, FOOTER_GAP)
     divider:SetTexture(0.4, 0.4, 0.4, 0.6)
 
+    -- Only shown for a specific selected ability (real spellId/melee
+    -- icon available) - hidden for the no-selection "Overall" summary,
+    -- which doesn't correspond to any one ability. detailName's LEFT
+    -- anchor moves onto this icon's RIGHT edge when it's shown (see
+    -- RefreshDetailPanel), same "no fixed reserved gap" reasoning as
+    -- the main window's class icon.
+    local detailIcon = rightPane:CreateTexture(nil, "OVERLAY")
+    detailIcon:SetWidth(DETAIL_ICON_SIZE)
+    detailIcon:SetHeight(DETAIL_ICON_SIZE)
+    detailIcon:SetPoint("TOPLEFT", rightPane, "TOPLEFT", 0, 0)
+    detailIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    detailIcon:Hide()
+    f.detailIcon = detailIcon
+
     local detailName = rightPane:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     detailName:SetPoint("TOPLEFT", rightPane, "TOPLEFT", 0, 0)
     detailName:SetJustifyH("LEFT")
@@ -493,7 +538,7 @@ local function CreateWindow()
     f.detailName = detailName
 
     local detailPanel = CreateFrame("Frame", nil, rightPane)
-    detailPanel:SetPoint("TOPLEFT", rightPane, "TOPLEFT", 0, -18)
+    detailPanel:SetPoint("TOPLEFT", rightPane, "TOPLEFT", 0, -(DETAIL_ICON_SIZE + 4))
     detailPanel:SetPoint("BOTTOMRIGHT", rightPane, "BOTTOMRIGHT", 0, 0)
     f.detailPanel = detailPanel
     for i = 1, MAX_DETAIL_ROWS do
@@ -562,8 +607,16 @@ end
 local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mode, filteredTargetName)
     if not window then return end
 
+    -- Default/no-selection state - only the "specific entry selected"
+    -- branch far below overrides this with a real icon + repositioned
+    -- name. Reset unconditionally here rather than in every "no
+    -- selection" branch below (deaths/empty/Overall summary all return
+    -- before reaching that branch) so none of them can forget to.
+    window.detailIcon:Hide()
+    window.detailName:SetPoint("TOPLEFT", window.rightPane, "TOPLEFT", 0, 0)
+
     local idx = 0
-    local function Line(label, value, vr, vg, vb)
+    local function Line(label, value, vr, vg, vb, icon)
         idx = idx + 1
         if idx > MAX_DETAIL_ROWS then return end
         local row = detailRows[idx]
@@ -571,6 +624,16 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         row.left:SetTextColor(1, 1, 1)
         row.right:SetText(value)
         row.right:SetTextColor(vr or 1, vg or 1, vb or 1)
+        -- Rows are pooled/reused across refreshes - a row that showed an
+        -- icon before must have it explicitly hidden if this refresh's
+        -- call for that same row index doesn't pass one, or it'd keep
+        -- showing whatever icon was left over from before.
+        if icon then
+            row.icon:SetTexture(icon)
+            row.icon:Show()
+        else
+            row.icon:Hide()
+        end
         row:Show()
     end
     local function Header(label)
@@ -580,6 +643,7 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         row.left:SetText(label)
         row.left:SetTextColor(1, 0.82, 0)
         row.right:SetText("")
+        row.icon:Hide()
         row:Show()
     end
 
@@ -630,7 +694,8 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         if top then
             local topPct = (unitTotal and unitTotal > 0) and (top.total / unitTotal * 100) or 0
             Header("Top Ability")
-            Line(top.name, FormatNumber(top.total) .. string.format(" (%.0f%%)", topPct))
+            local topIcon = top.isMelee and CL.MELEE_ICON or CL.GetSpellIcon(top.spellId)
+            Line(top.name, FormatNumber(top.total) .. string.format(" (%.0f%%)", topPct), nil, nil, nil, topIcon)
         end
 
         if mode ~= "deaths" and targets and table.getn(targets) > 0 then
@@ -648,6 +713,19 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
 
     window.detailEmpty:Hide()
     window.detailName:SetText(entry.name .. (filteredTargetName and ("  |cffffcc00vs " .. filteredTargetName .. "|r") or ""))
+
+    -- A specific ability is selected here (not the Overall summary,
+    -- which returns before reaching this point) - show its icon big,
+    -- next to the name, same as the "nice big" ask.
+    local bigIcon = entry.isMelee and CL.MELEE_ICON or CL.GetSpellIcon(entry.spellId)
+    if bigIcon then
+        window.detailIcon:SetTexture(bigIcon)
+        window.detailIcon:Show()
+        window.detailName:SetPoint("TOPLEFT", window.detailIcon, "TOPRIGHT", 6, -(DETAIL_ICON_SIZE / 2 - 7))
+    else
+        window.detailIcon:Hide()
+        window.detailName:SetPoint("TOPLEFT", window.rightPane, "TOPLEFT", 0, 0)
+    end
 
     Line("Total", FormatNumber(entry.total))
     if unitTotal and unitTotal > 0 then

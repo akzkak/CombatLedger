@@ -58,6 +58,9 @@ CL.defaultSettings = {
     windowOpacityPct = 81, -- background alpha, as a percent - ignored while matchPfui is on (81 matches the flat skin's pfUI-derived look)
     autoShowInCombat = true,
     autoHideOutOfCombat = false,
+    pfuiDock = false, -- dock the main window into pfUI's right chat panel (see UI_PfuiDock.lua) - opt-in, since it moves/resizes the window
+    showClassIcon = false, -- class icon before the name on each bar - opt-in, redundant with the existing class-colored bar fill for some tastes
+
     announcePulls = true, -- "Pull: X (spell)" chat print at the start of a boss/elite encounter - see Aggregator.lua's RecordDamage
 }
 
@@ -681,6 +684,25 @@ end
 -- Generic icon for melee entries (Auto Attack/Off-Hand have no spellId
 -- to look an icon up from).
 CL.MELEE_ICON = "Interface\\Icons\\Ability_MeleeDamage"
+
+-- Texture coordinates for Interface\TargetingFrame\UI-Classes-Circle's
+-- 4x3 class grid - a real Blizzard global (CLASS_ICON_TCOORDS) on most
+-- client builds, but not guaranteed without pfUI's own fallback
+-- definition of it, so this addon keeps its own copy rather than
+-- depending on pfUI being installed. Standard, unchanging vanilla
+-- values - no Death Knight/Monk/Demon Hunter/Evoker, those classes
+-- don't exist yet.
+CL.CLASS_ICON_TCOORDS = {
+    WARRIOR = { 0, 0.25, 0, 0.25 },
+    MAGE = { 0.25, 0.49609375, 0, 0.25 },
+    ROGUE = { 0.49609375, 0.7421875, 0, 0.25 },
+    DRUID = { 0.7421875, 0.98828125, 0, 0.25 },
+    HUNTER = { 0, 0.25, 0.25, 0.5 },
+    SHAMAN = { 0.25, 0.49609375, 0.25, 0.5 },
+    PRIEST = { 0.49609375, 0.7421875, 0.25, 0.5 },
+    WARLOCK = { 0.7421875, 0.98828125, 0.25, 0.5 },
+    PALADIN = { 0, 0.25, 0.5, 0.75 },
+}
 
 -- spellId -> icon texture path. GetSpellRecField's "spellIconID" field
 -- gives a numeric icon id, which GetSpellIconTexture resolves to a real
