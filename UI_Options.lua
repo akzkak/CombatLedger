@@ -15,7 +15,7 @@ local CL = CombatLedger
 local OPT = {}
 CL.UIOptions = OPT
 
-local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 450
+local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 474
 local MAX_WINDOW_ROWS = 4 -- most people won't run more than 2-3 extra meter windows at once
 local ROW_HEIGHT = 24
 
@@ -281,12 +281,28 @@ local function CreateWindow()
     local textureBtn = CreateSmallButton(pageGeneral, 130, "")
     textureBtn:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 1)
     textureBtn:SetScript("OnClick", function()
-        local cur = CL.GetSetting("barTexture") or "blizzard"
+        local cur = CL.GetSetting("barTexture") or "flat"
         CL.SetSetting("barTexture", CycleKey(CL.GetAvailableBarTextures(), cur))
         CL.FireAppearanceChanged()
         RefreshOptionsWindow()
     end)
     f.textureBtn = textureBtn
+
+    -- ShaguDPS-style borderless window - independent of Match pfUI (see
+    -- CL.ApplyWindowSkin's hideBorder branch).
+    local hideBorderLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    hideBorderLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    hideBorderLabel:SetText("Hide window border")
+    local hideBorderCB = CreateFrame("CheckButton", "CombatLedgerHideBorderCB", pageGeneral, "UICheckButtonTemplate")
+    hideBorderCB:SetWidth(20)
+    hideBorderCB:SetHeight(20)
+    hideBorderCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+    hideBorderCB:SetScript("OnClick", function()
+        CL.SetSetting("hideBorder", (this:GetChecked() == 1))
+        CL.FireAppearanceChanged()
+    end)
+    f.hideBorderCB = hideBorderCB
 
     local fontLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     y = NextY()
@@ -614,7 +630,8 @@ RefreshOptionsWindow = function()
         window.matchPfuiCB:SetChecked(CL.IsMatchPfui())
     end
 
-    window.textureBtn.label:SetText(LabelForKey(CL.GetAvailableBarTextures(), CL.GetSetting("barTexture") or "blizzard"))
+    window.textureBtn.label:SetText(LabelForKey(CL.GetAvailableBarTextures(), CL.GetSetting("barTexture") or "flat"))
+    window.hideBorderCB:SetChecked(CL.GetSetting("hideBorder"))
     window.fontBtn.label:SetText(LabelForKey(CL.FONTS, CL.GetSetting("fontKey") or "friz"))
     window.fontSizeStepper.value:SetText(tostring(CL.GetSetting("fontSize") or 10))
     local barHeight = CL.GetSetting("barHeight")

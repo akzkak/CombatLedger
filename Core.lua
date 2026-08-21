@@ -43,7 +43,8 @@ CL.IDLE_SECONDS = 12
 -- exposed in the Options window - see UI_Options.lua.
 CL.defaultSettings = {
     matchPfui = true, -- while true (and pfUI is loaded), bar texture + font mirror pfUI's own instead of barTexture/fontKey/fontSize below
-    barTexture = "blizzard",
+    barTexture = "flat", -- pfUI's own flat bar look, bundled in img/bar.tga (see CL.GetBarTexture) - the default even without pfUI installed
+    hideBorder = false, -- ShaguDPS-style borderless window, independent of matchPfui
     fontKey = "friz",
     fontSize = 10,
     barHeight = nil, -- nil = each window's own built-in default
@@ -198,16 +199,20 @@ function CL.IsMatchPfui()
     return CL.HasPfui() and (CL.GetSetting("matchPfui") ~= false)
 end
 
--- Two Blizzard-only choices for players who don't want the pfUI-matched
--- look and don't have pfUI installed, plus (when pfUI IS installed)
--- pfUI's own bundled bar textures - genuinely distinct styles (elvui/
--- gradient/striped/tukui), unlike Blizzard's own two options which look
--- nearly identical to each other. `pfui` here is the pfUI.media key
--- (see pfUI.lua's img: path resolution) for entries sourced that way.
+-- "Flat" is pfUI's own default bar look (img/bar.tga), bundled directly
+-- in this addon's own img/ folder (MIT-licensed from pfUI - see
+-- README) so it's available and looks identical whether or not pfUI is
+-- actually installed - this used to be exclusive to pfUI users via
+-- "Match pfUI", which only helps if you already run pfUI. It's the
+-- default (see CL.defaultSettings) - Blizzard/Smooth Gradient are still
+-- here for anyone who wants the classic look back. The remaining pfUI_*
+-- entries stay pfUI-sourced (elvui/gradient/striped/tukui skins aren't
+-- bundled, only pfUI's default) - `pfui` is the pfUI.media key (see
+-- pfUI.lua's img: path resolution) for those.
 CL.BAR_TEXTURES = {
+    { key = "flat", label = "Flat (default)" },
     { key = "blizzard", label = "Blizzard Default" },
     { key = "raid", label = "Smooth Gradient" },
-    { key = "pfui_bar", label = "pfUI Bar", pfui = "img:bar" },
     { key = "pfui_elvui", label = "ElvUI Style", pfui = "img:bar_elvui" },
     { key = "pfui_gradient", label = "pfUI Gradient", pfui = "img:bar_gradient" },
     { key = "pfui_striped", label = "Striped", pfui = "img:bar_striped" },
@@ -234,7 +239,10 @@ function CL.GetBarTexture()
     if CL.IsMatchPfui() and pfUI.media and pfUI.media["img:bar"] then
         return pfUI.media["img:bar"]
     end
-    local key = CL.GetSetting("barTexture") or "blizzard"
+    local key = CL.GetSetting("barTexture") or "flat"
+    if key == "flat" then
+        return "Interface\\AddOns\\CombatLedger\\img\\bar"
+    end
     if key == "raid" then
         return "Interface\\RaidFrame\\Raid-Bar-Hp-Fill"
     end
@@ -391,7 +399,15 @@ function CL.ApplyWindowSkin(f, borderR, borderG, borderB, opacityFallback)
     if f.backdrop_shadow then f.backdrop_shadow:Hide() end
     f:SetBackdrop(CL.WINDOW_BACKDROP)
     f:SetBackdropColor(0, 0, 0, CL.GetBackdropAlpha(opacityFallback))
-    f:SetBackdropBorderColor(borderR, borderG, borderB, 1)
+    -- ShaguDPS-style borderless option - just the edge line goes
+    -- transparent, background/bars are unaffected. Independent of
+    -- matchPfui (only applies in this manual-skin branch; pfUI's own
+    -- skin bakes its border into one texture, not selectively hideable).
+    if CL.GetSetting("hideBorder") then
+        f:SetBackdropBorderColor(0, 0, 0, 0)
+    else
+        f:SetBackdropBorderColor(borderR, borderG, borderB, 1)
+    end
 end
 
 -- Skins a small manually-built button (CreateHeaderButton-style: own

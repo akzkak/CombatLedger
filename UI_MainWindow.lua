@@ -809,6 +809,13 @@ local function CreateWindowFrame(inst)
     CL.ApplyFont(title)
     f.title = title
 
+    -- Forward-declared - assigned once announceBtn/modeBtn exist below,
+    -- referenced by both the resize grip's OnUpdate further down and
+    -- the mode-dropdown's onClick above the assignment point (both are
+    -- closures that only run later, so the upvalue just needs to exist
+    -- here, not be assigned yet).
+    local UpdateTitleVisibility
+
     -- Second header row: Reset (left) ... Mode | Segment (right, click-
     -- to-cycle). Compact single-letter labels - full names are still in
     -- each button's hover tooltip and in the dropdown menu itself.
@@ -929,6 +936,7 @@ local function CreateWindowFrame(inst)
                 f.mode = key
                 modeBtn.label:SetText(MODE_BTN_LABELS[key] or key)
                 f.title:SetText("|cff" .. themeHex .. MODE_TITLES[key] .. "|r")
+                UpdateTitleVisibility()
                 UpdateSegButtonForMode()
                 CL.SaveWindowState(id, f.mode, f.segment, f.threatFilter)
                 RefreshInstance(inst)
@@ -939,6 +947,26 @@ local function CreateWindowFrame(inst)
     SetButtonTooltip(modeBtn, "Mode", "Damage Done / Healing Done / Damage Taken / Deaths / Threat", themeR, themeG, themeB)
     CL.ApplyButtonSkin(modeBtn, themeR, themeG, themeB)
     f.modeBtn = modeBtn
+
+    -- The title sits centered on the SAME row as the header buttons
+    -- (see resetBtn/segBtn above) - fine at normal widths where there's
+    -- clear space between the two button clusters, but at a narrow
+    -- resize the title's actual rendered text can be wider than that
+    -- gap and overlaps the buttons into an unreadable mess. Measuring
+    -- the real gap (announceBtn's right edge to modeBtn's left edge)
+    -- against the title's actual string width - not a fixed width
+    -- threshold - means a short title like "Deaths" stays visible
+    -- longer than "Debuffs Given" would, instead of both hiding at the
+    -- same arbitrary cutoff.
+    UpdateTitleVisibility = function()
+        local gap = modeBtn:GetLeft() - announceBtn:GetRight()
+        if gap < title:GetStringWidth() + 6 then
+            title:Hide()
+        else
+            title:Show()
+        end
+    end
+    UpdateTitleVisibility()
 
     -- A real ScrollFrame (not a whole-row index shift like the History
     -- window) so a bar that only partially fits the remaining space
@@ -1021,6 +1049,7 @@ local function CreateWindowFrame(inst)
         f:SetWidth(newW)
         f:SetHeight(newH)
         barParent:SetWidth(newW - 12)
+        UpdateTitleVisibility()
     end)
     if CL.GetSetting("lockWindow") then grip:Hide() end
     f.resizeGrip = grip

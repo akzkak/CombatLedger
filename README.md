@@ -68,8 +68,11 @@ Drop the `CombatLedger` folder into your `Interface/AddOns` directory, alongside
 
 Not built yet, in no particular order:
 
-- **Encounter Breakdown Tool** — turn the History list into a real per-encounter report (full bars, per-ability/per-target breakdowns) instead of just a list of names to click into.
 - **Encounter Comparison Tool** — line up two saved encounters against each other (say, the same boss on two different pulls) to see what actually changed.
 - **Interrupts** — melee interrupts (Kick, Pummel) already have a real signal available from Nampower; pure spell-cast interrupts (Counterspell, Spell Lock) don't have a confirmed one yet.
 - **CC / CC Breaks** — crowd control applied, and broken early, likely on the same debuff-correlation pipeline Debuffs Given already uses.
 - **Raid Prebuff Inspector** — a live check of which raid buffs each party/raid member is actually missing, based on class/spec. A different model from everything else here, since it needs to work before combat starts rather than per-encounter.
+
+## Credits
+
+The default "Flat" bar texture (`img/bar.tga`) is [pfUI](https://github.com/shagu/pfUI)'s own bar texture by Eric Mauser (Shagu), bundled here so that look is available without requiring pfUI itself — used under pfUI's MIT license.
