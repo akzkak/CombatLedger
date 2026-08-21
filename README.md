@@ -5,11 +5,11 @@ A combat meter for 1.12 WoW, built on [Nampower](https://github.com/namreeb/namp
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="screenshots/main.png" width="260"><br>
+      <img src="screenshots/main.png" width="380"><br>
       <sub><b>Main window</b> — Damage Done</sub>
     </td>
     <td align="center" width="50%">
-      <img src="screenshots/breakdown.png" width="260"><br>
+      <img src="screenshots/breakdown.png" width="380"><br>
       <sub>Click any bar for a full <b>per-ability, per-target breakdown</b></sub>
     </td>
   </tr>
