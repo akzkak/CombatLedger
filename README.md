@@ -37,7 +37,7 @@ Every mode has **Current Fight**, session-long **Overall**, and a scrollable **H
 
 Each window also has its own **Auto-show**, **Auto-hide**, and **Grouped only** rules, managed from Options' Windows list — so a Threat meter can stay hidden until you're grouped *and* in combat, while your Damage meter just stays up all the time. A "Mirror Main" button on each extra window copies Main's current size/position over in one click.
 
-CombatLedger also announces **who pulled** a boss/elite encounter and with what ability, straight to chat — toggleable in Options.
+CombatLedger also announces **who pulled** a boss encounter and with what ability, straight to chat — toggleable in Options.
 
 ## Requirements
 

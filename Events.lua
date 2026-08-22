@@ -49,10 +49,32 @@ local function IsRelevant(guidA, guidB)
     return CL.GuidCache.IsTracked(guidA) or CL.GuidCache.IsTracked(guidB)
 end
 
+-- Declared here (not down near FinishEncounter, where the idle-trim
+-- logic that reads lastEventTime lives) so the Handle* functions below
+-- can call it - Lua resolves an identifier at compile time based on
+-- what's lexically in scope ABOVE it in the file, so a local declared
+-- later is invisible to code above it and would silently resolve to a
+-- nonexistent global instead.
+local lastEventTime = 0
+local function TouchActivity()
+    lastEventTime = GetTime()
+end
+
 local function HandleAutoAttack(isSelf, attackerGuid, targetGuid, totalDamage, hitInfo, victimState, componentCount, blocked, absorbed, resisted)
     totalDamage = tonumber(totalDamage) or 0
     hitInfo = tonumber(hitInfo)
     local relevant = IsRelevant(attackerGuid, targetGuid)
+    -- Only touches activity for OUR OWN combat, not every hit anyone
+    -- nearby lands - TouchActivity() used to be called unconditionally
+    -- by the dispatcher before relevance was even known, so a busy area
+    -- (other players fighting other things nearby) kept lastEventTime
+    -- constantly fresh regardless of whether the PLAYER was still doing
+    -- anything. That silently defeated both the idle-timeout fallback
+    -- and EndEncounter's trailing-idle-time trim (see Aggregator.lua) -
+    -- confirmed via debug log: dense [FILTERED] combat noise from other
+    -- players kept a finished fight's reported duration inflated by
+    -- however long that noise kept going after the real fight ended.
+    if relevant then TouchActivity() end
     if CL.debug then
         CL.LogLine(string.format(
             "%s[AUTO_ATTACK_%s] atk=%s tgt=%s dmg=%d hitInfo=%s victimState=%s comp=%s blocked=%s absorbed=%s resisted=%s",
@@ -75,21 +97,69 @@ local function HandleAutoAttack(isSelf, attackerGuid, targetGuid, totalDamage, h
     end
 end
 
+-- SPELL_DAMAGE_EVENT's last argument is "effect1,effect2,effect3,auraType"
+-- per Nampower's EVENTS.md - the 4th field only present "if applicable".
+-- auraType 3 (SPELL_AURA_PERIODIC_DAMAGE), 89
+-- (SPELL_AURA_PERIODIC_DAMAGE_PERCENT), or 53 (SPELL_AURA_PERIODIC_LEECH -
+-- Siphon Life's actual aura type, since it damages the target AND heals
+-- the caster from one periodic tick), per vmangos-core's
+-- SpellAuraDefines.h, means this specific damage instance was a DoT
+-- tick, not the spell's initial hit - e.g. Rake/Immolate's opening
+-- strike can crit, the bleed/burn ticks after it never can, and mixing
+-- both into one min/max is exactly what read as "weird" reports.
+-- There's no dedicated periodic flag (unlike SPELL_HEAL's periodicFlag
+-- param below), so this is the only signal available - a full
+-- comma-split (not just "whatever's after the last comma") is
+-- necessary since a non-periodic hit's effect string only has 3 fields,
+-- not 4, so its last field is a real effect number, not an aura type.
+local PERIODIC_AURA_TYPES = { ["3"] = true, ["89"] = true, ["53"] = true }
+
+-- Confirmed via debug log that some SPELL_AURA_PERIODIC_LEECH spells
+-- (damage the target AND heal the caster off the same tick) never carry
+-- an aura-type tail at all - Siphon Life's SPELL_DAMAGE_EVENT reports
+-- effect=6,0,0,0 on every single tick, even though every hit IS a tick
+-- (the spell has no separate upfront direct-hit component). Nampower/
+-- vmangos just doesn't tag these, so effect-string parsing can't see
+-- it - listed here as a known, confirmed exception. Add more spellIds
+-- if another leech-style DoT (e.g. Drain Life) shows the same gap.
+local ALWAYS_PERIODIC_SPELLS = {
+    [18881] = true, -- Siphon Life
+}
+
+local function IsPeriodicEffect(effectStr, spellId)
+    if ALWAYS_PERIODIC_SPELLS[spellId] then return true end
+    if not effectStr or effectStr == "" then return false end
+    local fields = {}
+    local from = 1
+    while true do
+        local pos = string.find(effectStr, ",", from, true)
+        if not pos then
+            table.insert(fields, string.sub(effectStr, from))
+            break
+        end
+        table.insert(fields, string.sub(effectStr, from, pos - 1))
+        from = pos + 1
+    end
+    return PERIODIC_AURA_TYPES[fields[4]] == true
+end
+
 local function HandleSpellDamage(isSelf, targetGuid, casterGuid, spellId, amount, mitigation, hitInfo, school, effect)
     amount = tonumber(amount) or 0
     spellId = tonumber(spellId)
     hitInfo = tonumber(hitInfo)
     local name = SpellName(spellId)
     local relevant = IsRelevant(casterGuid, targetGuid)
+    if relevant then TouchActivity() end -- see HandleAutoAttack's comment - relevance-gated, not blanket
     if CL.debug then
         CL.LogLine(string.format(
-            "%s[SPELL_DAMAGE_EVENT_%s] tgt=%s caster=%s spell=%s(%s) dmg=%d mitigation=%s hitInfo=%s school=%s",
+            "%s[SPELL_DAMAGE_EVENT_%s] tgt=%s caster=%s spell=%s(%s) dmg=%d mitigation=%s hitInfo=%s school=%s effect=%s",
             relevant and "" or "[FILTERED] ", isSelf and "SELF" or "OTHER", tostring(targetGuid), tostring(casterGuid),
-            tostring(name), tostring(spellId), amount, tostring(mitigation), tostring(hitInfo), tostring(school)))
+            tostring(name), tostring(spellId), amount, tostring(mitigation), tostring(hitInfo), tostring(school), tostring(effect)))
     end
     if relevant and amount > 0 then
         local isCrit = CL.HasBit(hitInfo, CL.SPELL_DAMAGE_HITFLAG_CRIT)
-        CL.Aggregator.RecordDamage(casterGuid, targetGuid, spellId, name, school, amount, isCrit)
+        local isPeriodic = IsPeriodicEffect(effect, spellId)
+        CL.Aggregator.RecordDamage(casterGuid, targetGuid, spellId, name, school, amount, isCrit, nil, isPeriodic)
     end
 end
 
@@ -99,6 +169,7 @@ local function HandleSpellHeal(targetGuid, casterGuid, spellId, amount, critFlag
     local name = SpellName(spellId)
     local isCrit = (critFlag == "1" or critFlag == 1 or critFlag == true)
     local relevant = IsRelevant(casterGuid, targetGuid)
+    if relevant then TouchActivity() end -- see HandleAutoAttack's comment - relevance-gated, not blanket
     if CL.debug then
         CL.LogLine(string.format(
             "%s[SPELL_HEAL] tgt=%s caster=%s spell=%s(%s) heal=%d crit=%s periodic=%s",
@@ -117,6 +188,7 @@ local function HandleSpellDispel(casterGuid, targetGuid, spellId)
     spellId = tonumber(spellId)
     local name = SpellName(spellId)
     local relevant = IsRelevant(casterGuid, targetGuid)
+    if relevant then TouchActivity() end -- see HandleAutoAttack's comment - relevance-gated, not blanket
     if CL.debug then
         CL.LogLine(string.format(
             "%s[SPELL_DISPEL] caster=%s tgt=%s spell=%s(%s)",
@@ -161,6 +233,14 @@ local function HandleAuraCast(spellId, casterGuid, targetGuid)
     -- reason to stash something neither side is tracked for).
     if not IsRelevant(casterGuid, targetGuid) then return end
     pendingAuraCasts[targetGuid .. "|" .. spellId] = { casterGuid = casterGuid, time = GetTime() }
+
+    -- "Casts" count for the breakdown window (see UI_BreakdownWindow.lua)
+    -- - fires once per actual cast, unlike a DoT's damage entry which
+    -- fires once per tick. RecordCast no-ops internally for a caster
+    -- that isn't actually tracked, and for a spell that never ends up
+    -- dealing damage it just sits as an unread pending count - safe to
+    -- call unconditionally here.
+    CL.Aggregator.RecordCast(casterGuid, spellId, SpellName(spellId))
 end
 
 local function HandleDebuffAdded(guid, spellId)
@@ -216,7 +296,16 @@ local autoShownMainWindow = false -- see the PLAYER_ENTERING_WORLD handler below
 -- use, so the theoretical risk isn't worth the stop feeling delayed on
 -- every single fight to guard against an edge case that doesn't
 -- actually bite in practice.
-local lastEventTime = 0
+local function IsGrouped()
+    return ((GetNumRaidMembers and GetNumRaidMembers()) or 0) > 0
+        or ((GetNumPartyMembers and GetNumPartyMembers()) or 0) > 0
+end
+
+-- Tracked across PARTY_MEMBERS_CHANGED/RAID_ROSTER_UPDATE so "Clear on
+-- join party" (Options) can fire only on the actual solo -> grouped
+-- transition, not on every roster change while already grouped (someone
+-- else joining/leaving a raid you're already in shouldn't wipe Overall).
+local wasGrouped = IsGrouped()
 
 -- Checks whether anyone else in the group is still flagged in combat.
 -- On this client, GetNumPartyMembers() has been observed nonzero AT THE
@@ -243,12 +332,12 @@ local function AnyGroupMemberInCombat()
     return false
 end
 
-local function TouchActivity()
-    lastEventTime = GetTime()
-end
-
 local function FinishEncounter()
-    local finished = CL.Aggregator.EndEncounter()
+    -- lastEventTime (touched by every relevant combat event - see
+    -- TouchActivity above) trims trailing idle time out of the reported
+    -- duration, matching GreedMeter's own Parser:OnCombatEnd - see
+    -- Aggregator.lua's EndEncounter for why.
+    local finished = CL.Aggregator.EndEncounter(lastEventTime)
     if not finished then return end
 
     -- Skip saving near-nothing encounters (a stray hit that barely
@@ -347,11 +436,19 @@ f:SetScript("OnEvent", function()
         -- refresh on party/raid change alone misses a pet that appears
         -- or disappears without the group composition itself changing.
         CL.GuidCache.RefreshRoster()
-        if (event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE") and CL.UI and CL.UI.ReconcileGroupVisibility then
+        if event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
             -- Only the two real group-composition events, not UNIT_PET -
             -- a pet appearing/disappearing doesn't change whether the
             -- player is grouped, which is all this checks.
-            CL.UI.ReconcileGroupVisibility()
+            if CL.UI and CL.UI.ReconcileGroupVisibility then
+                CL.UI.ReconcileGroupVisibility()
+            end
+            local grouped = IsGrouped()
+            if grouped and not wasGrouped and CL.GetSetting("clearOnJoinParty") then
+                CL.Aggregator.ResetOverall()
+                CL.Print("Overall cleared - joined a group.")
+            end
+            wasGrouped = grouped
         end
         return
     end
@@ -384,29 +481,24 @@ f:SetScript("OnEvent", function()
     end
 
     if event == "AUTO_ATTACK_SELF" then
-        TouchActivity()
         HandleAutoAttack(true, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
         return
     end
     if event == "AUTO_ATTACK_OTHER" then
-        TouchActivity()
         HandleAutoAttack(false, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
         return
     end
 
     if event == "SPELL_DAMAGE_EVENT_SELF" then
-        TouchActivity()
         HandleSpellDamage(true, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
         return
     end
     if event == "SPELL_DAMAGE_EVENT_OTHER" then
-        TouchActivity()
         HandleSpellDamage(false, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
         return
     end
 
     if event == "SPELL_HEAL_BY_SELF" or event == "SPELL_HEAL_BY_OTHER" or event == "SPELL_HEAL_ON_SELF" then
-        TouchActivity()
         HandleSpellHeal(arg1, arg2, arg3, arg4, arg5, arg6)
         return
     end
@@ -437,7 +529,6 @@ f:SetScript("OnEvent", function()
     -- Shape: casterGuid, targetGuid, spellId - see HandleSpellDispel
     -- above.
     if event == "SPELL_DISPEL_BY_SELF" or event == "SPELL_DISPEL_BY_OTHER" then
-        TouchActivity()
         HandleSpellDispel(arg1, arg2, arg3)
         return
     end

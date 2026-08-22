@@ -21,7 +21,7 @@ CL.UIOptions = OPT
 -- RefreshOptionsWindow reflows resetPosBtn up to sit right after
 -- however many windows actually exist, so this is a ceiling, not what
 -- most people will actually see below their last row.
-local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 580
+local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 604 -- +24 over the prior ceiling for "Clear on join party"'s own row
 local MAX_WINDOW_ROWS = 4 -- most people won't run more than 2-3 extra meter windows at once
 local ROW_HEIGHT = 24
 
@@ -616,7 +616,7 @@ local function CreateWindow()
     local announcePullsLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     y = NextY()
     announcePullsLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
-    announcePullsLabel:SetText("Announce pulls (boss/elite only)")
+    announcePullsLabel:SetText("Announce pulls (boss only)")
     local announcePullsCB = CreateFrame("CheckButton", "CombatLedgerAnnouncePullsCB", pageAdvanced, "UICheckButtonTemplate")
     announcePullsCB:SetWidth(20)
     announcePullsCB:SetHeight(20)
@@ -639,6 +639,25 @@ local function CreateWindow()
         CL.FireAppearanceChanged()
     end)
     f.testCB = testCB
+
+    -- Auto-resets the Overall segment the instant you go from solo to
+    -- grouped (see Events.lua's PARTY_MEMBERS_CHANGED/RAID_ROSTER_UPDATE
+    -- handler) - handy for keeping Overall meaning "this raid" instead
+    -- of carrying over whatever solo grinding happened beforehand.
+    -- Doesn't touch Current Fight or saved History, same as the R
+    -- (Reset) button.
+    local clearOnJoinLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    clearOnJoinLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    clearOnJoinLabel:SetText("Clear on join party")
+    local clearOnJoinCB = CreateFrame("CheckButton", "CombatLedgerClearOnJoinCB", pageAdvanced, "UICheckButtonTemplate")
+    clearOnJoinCB:SetWidth(20)
+    clearOnJoinCB:SetHeight(20)
+    clearOnJoinCB:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 3)
+    clearOnJoinCB:SetScript("OnClick", function()
+        CL.SetSetting("clearOnJoinParty", (this:GetChecked() == 1))
+    end)
+    f.clearOnJoinCB = clearOnJoinCB
 
     -- Windows - "main" (this addon's original single window) always
     -- exists and isn't listed here; extra windows are what "+ New
@@ -759,6 +778,7 @@ local function CreateWindow()
             pfUI.api.SkinCheckbox(classColorCB)
             pfUI.api.SkinCheckbox(smoothCB)
             pfUI.api.SkinCheckbox(testCB)
+            pfUI.api.SkinCheckbox(clearOnJoinCB)
             pfUI.api.SkinCheckbox(announcePullsCB)
             if matchPfuiCB then pfUI.api.SkinCheckbox(matchPfuiCB) end
             pfUI.api.SkinButton(textureBtn)
@@ -852,6 +872,7 @@ RefreshOptionsWindow = function()
     window.announcePullsCB:SetChecked(CL.GetSetting("announcePulls") ~= false)
 
     window.testCB:SetChecked(CL.testMode)
+    window.clearOnJoinCB:SetChecked(CL.GetSetting("clearOnJoinParty"))
 
     if window.windowRows then
         local list = (CL.UI and CL.UI.GetWindowList and CL.UI.GetWindowList()) or {}

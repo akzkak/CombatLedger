@@ -200,6 +200,14 @@ local function BuildSpellList(bucket)
                 min = s.min,
                 max = s.max,
                 spellId = spellId,
+                -- Direct-hit-vs-DoT-tick split (see Aggregator.lua's
+                -- EnsureSplitBucket / Events.lua's IsPeriodicEffect) -
+                -- nil on a spell that's never had a periodic tick.
+                directHits = s.directHits,
+                tickHits = s.tickHits,
+                -- Real cast count (see Aggregator.lua's RecordCast) -
+                -- nil on a spell that never had a cast event tracked.
+                casts = s.casts,
             })
         end
     end
@@ -732,7 +740,56 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         Line("% of Total", string.format("%.0f%%", entry.total / unitTotal * 100))
     end
     Line("Rate", FormatNumber(entry.total / (duration or 1)) .. " " .. CL.RateSuffix(mode))
-    Line("Hits", tostring(entry.hits or 0))
+
+    -- A pure DoT (Curse of Agony) has no direct-hit component, so "Hits"
+    -- and the Ticks line below would just repeat the same number under
+    -- two labels - call it "Casts" instead, sourced from entry.casts
+    -- (Events.lua's HandleAuraCast/Aggregator's RecordCast, fires once
+    -- per actual cast, not once per tick - see Aggregator.lua's
+    -- RecordCastInto). Falls back to entry.hits if casts wasn't tracked
+    -- (per-target sub-entries don't get it - see RecordCastInto). A
+    -- spell with BOTH a direct hit and ticks (Rake/Immolate) skips this
+    -- line entirely - Direct Hits/Ticks below already cover it, and a
+    -- blended "Hits" on top would just be noise. A normal ability
+    -- (neither) keeps plain "Hits".
+    local hasTicks = entry.tickHits and entry.tickHits.hits > 0
+    local hasDirect = entry.directHits and entry.directHits.hits > 0
+    if hasTicks and hasDirect then
+        -- skip - Direct Hits/Ticks lines below take this slot instead
+    elseif hasTicks then
+        Line("Casts", tostring(entry.casts or entry.hits or 0))
+    else
+        Line("Hits", tostring(entry.hits or 0))
+    end
+
+    -- A spell like Rake or Immolate has TWO differently-shaped damage
+    -- components under one spellId: an initial direct hit (can crit)
+    -- and a DoT tick (never can - see Events.lua's IsPeriodicEffect).
+    -- One blended min/max across both reads as "weird" (the crit sets
+    -- max, a tick sets min, neither number describes a real single
+    -- category of hit) - split into two lines instead whenever a spell
+    -- actually has both. Untouched for every other spell (pure direct
+    -- damage, or a pure DoT with no separate initial hit). Kept right
+    -- under Casts/Hits (not down by Crits/Avg normal hit) so the
+    -- hit-count breakdown reads as one consistent block.
+    if hasTicks then
+        local dh = entry.directHits
+        if dh and dh.hits > 0 then
+            local dhLine = tostring(dh.hits)
+            if dh.min and dh.max then
+                dhLine = dhLine .. "  (" .. FormatNumber(dh.min) .. " - " .. FormatNumber(dh.max) .. ")"
+            end
+            Line("Direct Hits", dhLine)
+        end
+        local th = entry.tickHits
+        local thLine = tostring(th.hits)
+        if th.min and th.max then
+            thLine = thLine .. "  (" .. FormatNumber(th.min) .. " - " .. FormatNumber(th.max) .. ")"
+        end
+        Line("Ticks", thLine)
+    elseif entry.min and entry.max then
+        Line("Min / Max", FormatNumber(entry.min) .. " / " .. FormatNumber(entry.max))
+    end
 
     if entry.crits ~= nil then
         local hits = entry.hits or 0
@@ -749,10 +806,6 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         if nonCritHits > 0 then
             Line("Avg normal hit", FormatNumber((entry.total - critTotal) / nonCritHits))
         end
-    end
-
-    if entry.min and entry.max then
-        Line("Min / Max", FormatNumber(entry.min) .. " / " .. FormatNumber(entry.max))
     end
 
     -- Main/off-hand avoidance shown separately, not summed - they carry

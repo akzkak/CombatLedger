@@ -230,6 +230,13 @@ local function EnsureSpellEntry(spells, spellId, name, school)
     if not s then
         s = { name = name, school = school, hits = 0, crits = 0, total = 0, critTotal = 0, min = nil, max = nil }
         spells[spellId] = s
+    else
+        -- RecordCast can create this entry first (a DoT's AURA_CAST
+        -- fires before its first tick), with no school known yet -
+        -- backfill once real damage data supplies it, instead of
+        -- leaving it permanently nil.
+        if name and not s.name then s.name = name end
+        if school and not s.school then s.school = school end
     end
     return s
 end
@@ -245,7 +252,29 @@ local function RecordHit(entry, amount, isCrit)
     if not entry.max or amount > entry.max then entry.max = amount end
 end
 
+-- Lazily creates a same-shaped sub-bucket on a spell entry, keyed
+-- "directHits" or "tickHits" - see RecordDamageInto's isPeriodic
+-- threading. Kept entirely separate from (and additive to) the spell
+-- entry's own top-level RecordHit call, which stays the combined
+-- hit+tick total exactly as before - nothing that already reads
+-- entry.total/.hits/.min/.max (bar sorting, DPS math, "Top Ability")
+-- needs to change or even know this split exists. This is purely for
+-- UI_BreakdownWindow.lua to show separate Hits/Ticks lines under a
+-- spell that has both, since a DoT tick can never crit but its
+-- initial hit can - mixing the two into one min/max produced reports
+-- that read as "weird" (e.g. Rake/Immolate) without ever actually
+-- being wrong, just conflating two different kinds of numbers.
+local function EnsureSplitBucket(entry, key)
+    local b = entry[key]
+    if not b then
+        b = { hits = 0, crits = 0, total = 0, critTotal = 0, min = nil, max = nil }
+        entry[key] = b
+    end
+    return b
+end
+
 local lastFinished = nil -- frozen snapshot of the previous fight, shown as "Current Fight" between pulls
+local lastFinishedTime = nil -- GetTime() when lastFinished was set - see ShouldLazyStart below
 
 local function StartEncounter()
     if current then return end
@@ -274,12 +303,12 @@ end
 -- Used to be skipped for RecordDamage/RecordAvoidance/RecordInterrupt/
 -- RecordDebuffGiven specifically, on the theory that gating on combat
 -- risked dropping the first hit of a fresh pull if UnitAffectingCombat
--- hadn't flipped true yet. That theory never actually panned out - the
--- real missed-first-hit bug those functions were protecting against
--- turned out to be upstream of this addon entirely (see the
--- PLAYER_ENTERING_WORLD/reload comment in Events.lua) - so the
--- defensive exemption was just leaving this hole open for no real
--- benefit. All Record* functions use the same guard now.
+-- hadn't flipped true yet. That theory DID pan out after all, confirmed
+-- via debug log against a training dummy: dummies here don't reliably
+-- flip the player's own combat flag at all, so gating unconditionally
+-- on it dropped a real spell's entire initial hit (Immolate's opening
+-- burn, 334 of its 1044 total) every single time - the encounter's
+-- FIRST event is exactly the one this guard can't afford to reject.
 --
 -- Checks the PLAYER's own combat flag specifically, NOT the whole
 -- group's - used to check raid/party members too, which reintroduced
@@ -293,6 +322,25 @@ end
 local function IsPlayerInCombat()
     local ok, playerCombat = pcall(UnitAffectingCombat, "player")
     return ok and playerCombat and true or false
+end
+
+-- The actual guard every Record*'s lazy "if not current then
+-- StartEncounter()" uses (see above) - combines both fixes instead of
+-- picking one at the other's expense. IsPlayerInCombat() alone always
+-- passes; the phantom-encounter risk only ever came from a stray
+-- TRAILING event shortly after a real fight just ended, not from a
+-- genuine fresh pull. So: allow immediately if the player's combat flag
+-- already agrees, OR if it's been a while (no encounter recently ended,
+-- or long enough since one did) - only refuse in the narrow window
+-- right after lastFinished was set, where a still-unflagged hit is far
+-- more likely a trailing tick than a real new pull.
+local PHANTOM_GUARD_WINDOW = 3 -- seconds after a fight ends where an unflagged hit is treated as a trailing event, not a new pull
+local function ShouldLazyStart()
+    if IsPlayerInCombat() then return true end
+    if lastFinishedTime and (GetTime() - lastFinishedTime) < PHANTOM_GUARD_WINDOW then
+        return false
+    end
+    return true
 end
 
 local function GetCurrent()
@@ -414,14 +462,32 @@ local function GetOverallDuration()
     return d
 end
 
-local function EndEncounter()
+-- lastActivityTime (Events.lua's own lastEventTime, touched by every
+-- relevant combat event) trims trailing idle time out of the reported
+-- duration - PLAYER_REGEN_ENABLED can fire well after the last real hit
+-- (standing around still "in combat" for other reasons, a slow-to-clear
+-- flag, waiting out the grace window), which was inflating duration and
+-- understating DPS/rate for every mode. GreedMeter (this addon's own
+-- reference point) does exactly this same trim in its own
+-- Parser:OnCombatEnd - matching it is why a side-by-side comparison
+-- kept showing a shorter GreedMeter duration for the identical fight.
+-- Only ever shrinks duration, never extends it, and only when the last
+-- activity actually falls inside this encounter's own span.
+local function EndEncounter(lastActivityTime)
     if not current then return nil end
     current.duration = GetTime() - current.startTime
+    if lastActivityTime and lastActivityTime >= current.startTime and lastActivityTime < GetTime() then
+        local trimmed = lastActivityTime - current.startTime
+        if trimmed > 0 and trimmed < current.duration then
+            current.duration = trimmed
+        end
+    end
     current.timestamp = time()
     overall.activeDuration = (overall.activeDuration or 0) + current.duration
     local finished = current
     current = nil
     lastFinished = finished
+    lastFinishedTime = GetTime()
     return finished
 end
 
@@ -443,16 +509,29 @@ end
 
 -- This client's SuperWoW lets a raw GUID stand in for a unit token
 -- directly (see GuidCache.lua/RecordDamage's own UnitHealthMax use) -
--- UnitClassification(guid) resolves right here the same way, as long as
--- the enemy is actually in range, which it is by definition (we just
--- recorded a hit involving it). "boss tagged" mirrors TWThreat's own
--- elite/worldboss-only restriction (see Threat.lua) rather than
--- inventing a different bar here.
+-- UnitClassification(guid)/UnitLevel(guid) resolve right here the same
+-- way, as long as the enemy is actually in range, which it is by
+-- definition (we just recorded a hit involving it).
+--
+-- Plain "elite" alone (TWThreat's own restriction, which this used to
+-- just mirror) catches every elite trash pack too, not just real
+-- bosses - most vanilla instance bosses aren't actually classified
+-- "worldboss" (that classification is mostly reserved for open-world
+-- named bosses like Onyxia), so a real boss is identified here as
+-- EITHER worldboss, OR elite/rareelite with no real level shown
+-- ("??", UnitLevel returning -1) - the common heuristic other addons
+-- use, since regular elite trash almost always has a real numeric
+-- level.
 local function IsBossTaggedEnemy(enemyGuid)
     if not enemyGuid or not UnitClassification then return false end
     local ok, classification = pcall(UnitClassification, enemyGuid)
     if not ok then return false end
-    return classification == "elite" or classification == "worldboss"
+    if classification == "worldboss" then return true end
+    if classification == "elite" or classification == "rareelite" then
+        local lvlOk, level = pcall(UnitLevel, enemyGuid)
+        return lvlOk and level == -1
+    end
+    return false
 end
 
 -- Which melee sub-entry a dmg=0-or-not auto-attack swing belongs in -
@@ -471,14 +550,23 @@ end
 -- mob happens to be on the other end of the hit (a mob dealing damage
 -- to you is not a "Damage Done" entry for the mob, and a mob you're
 -- hitting is not a "Damage Taken" entry for the mob).
-local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
+local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic)
     if casterGuid then
         local attributed = AttributedGuid(casterGuid)
         if IsTrackedGuid(attributed) then
             local u = EnsureUnit(units, attributed)
             u.damageDone.total = u.damageDone.total + amount
             if spellId then
-                RecordHit(EnsureSpellEntry(u.damageDone.spells, spellId, spellName, school), amount, isCrit)
+                local entry = EnsureSpellEntry(u.damageDone.spells, spellId, spellName, school)
+                -- A DoT's AURA_CAST (see RecordCast) can land before this
+                -- entry exists - fold in whatever cast count was stashed
+                -- waiting for it, once, right when the entry is born.
+                if u.pendingCasts and u.pendingCasts[spellId] then
+                    entry.casts = (entry.casts or 0) + u.pendingCasts[spellId]
+                    u.pendingCasts[spellId] = nil
+                end
+                RecordHit(entry, amount, isCrit)
+                RecordHit(EnsureSplitBucket(entry, isPeriodic and "tickHits" or "directHits"), amount, isCrit)
             else
                 RecordHit(MeleeEntryFor(u.damageDone, attributed ~= casterGuid, isOffhand), amount, isCrit)
             end
@@ -506,7 +594,9 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
                 t.total = t.total + amount
                 t.hits = t.hits + 1
                 if spellId then
-                    RecordHit(EnsureSpellEntry(t.spells, spellId, spellName, school), amount, isCrit)
+                    local entry = EnsureSpellEntry(t.spells, spellId, spellName, school)
+                    RecordHit(entry, amount, isCrit)
+                    RecordHit(EnsureSplitBucket(entry, isPeriodic and "tickHits" or "directHits"), amount, isCrit)
                 else
                     RecordHit(MeleeEntryFor(t, attributed ~= casterGuid, isOffhand), amount, isCrit)
                 end
@@ -520,7 +610,9 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
             local u = EnsureUnit(units, attributed)
             u.damageTaken.total = u.damageTaken.total + amount
             if spellId then
-                RecordHit(EnsureSpellEntry(u.damageTaken.spells, spellId, spellName, school), amount, isCrit)
+                local entry = EnsureSpellEntry(u.damageTaken.spells, spellId, spellName, school)
+                RecordHit(entry, amount, isCrit)
+                RecordHit(EnsureSplitBucket(entry, isPeriodic and "tickHits" or "directHits"), amount, isCrit)
             else
                 RecordHit(MeleeEntryFor(u.damageTaken, attributed ~= targetGuid, isOffhand), amount, isCrit)
             end
@@ -544,7 +636,9 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
                 s.total = s.total + amount
                 s.hits = s.hits + 1
                 if spellId then
-                    RecordHit(EnsureSpellEntry(s.spells, spellId, spellName, school), amount, isCrit)
+                    local entry = EnsureSpellEntry(s.spells, spellId, spellName, school)
+                    RecordHit(entry, amount, isCrit)
+                    RecordHit(EnsureSplitBucket(entry, isPeriodic and "tickHits" or "directHits"), amount, isCrit)
                 else
                     RecordHit(MeleeEntryFor(s, false, isOffhand), amount, isCrit)
                 end
@@ -553,9 +647,9 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
     end
 end
 
-local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
+local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic)
     if not current then
-        if not IsPlayerInCombat() then return end
+        if not ShouldLazyStart() then return end
         StartEncounter()
     end
 
@@ -572,8 +666,8 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
         end
     end
 
-    RecordDamageInto(current.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
-    RecordDamageInto(overall.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
+    RecordDamageInto(current.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic)
+    RecordDamageInto(overall.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic)
 
     if casterGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
         RecordSeriesPoint(current, "damage", amount)
@@ -629,6 +723,42 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
     end
 end
 
+-- "Casts" for a DoT (Corruption, Curse of Agony) is a genuinely
+-- different number than its tick count - one cast produces several
+-- ticks over the debuff's duration - so it needs its own signal instead
+-- of reusing entry.hits (see Events.lua's HandleAuraCast). Only ever
+-- attributed to the top-level unit entry (u.damageDone.spells), not
+-- per-target sub-entries - "Casts" is shown on the unit-wide breakdown
+-- panel, not the per-target one.
+local function RecordCastInto(units, casterGuid, spellId, spellName)
+    if not casterGuid or not spellId then return end
+    local attributed = AttributedGuid(casterGuid)
+    if not IsTrackedGuid(attributed) then return end
+    local u = EnsureUnit(units, attributed)
+    local entry = u.damageDone.spells[spellId]
+    if entry then
+        entry.casts = (entry.casts or 0) + 1
+    else
+        -- No damage entry yet (the cast fires before the first tick
+        -- lands) - stash the count on the unit itself, NOT as a spell
+        -- entry, so a spell that never actually deals damage (an
+        -- ordinary self-buff cast, also seen on AURA_CAST) never shows
+        -- up as a stray zero-damage row in Damage Done. RecordDamageInto
+        -- folds this in once a real entry is created.
+        u.pendingCasts = u.pendingCasts or {}
+        u.pendingCasts[spellId] = (u.pendingCasts[spellId] or 0) + 1
+    end
+end
+
+local function RecordCast(casterGuid, spellId, spellName)
+    if not current then
+        if not ShouldLazyStart() then return end
+        StartEncounter()
+    end
+    RecordCastInto(current.units, casterGuid, spellId, spellName)
+    RecordCastInto(overall.units, casterGuid, spellId, spellName)
+end
+
 local VICTIMSTATE_KEY = {
     [CL.VICTIMSTATE_MISS] = "miss",
     [CL.VICTIMSTATE_DODGE] = "dodge",
@@ -664,7 +794,7 @@ end
 -- writes into both current and overall like every other Record* call.
 local function RecordAvoidance(casterGuid, targetGuid, victimState, isOffhand)
     if not current then
-        if not IsPlayerInCombat() then return end
+        if not ShouldLazyStart() then return end
         StartEncounter()
     end
     local key = VICTIMSTATE_KEY[victimState] or "other"
@@ -697,7 +827,7 @@ end
 
 local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
     if not current then
-        if not IsPlayerInCombat() then return end
+        if not ShouldLazyStart() then return end
         StartEncounter()
     end
     RecordHealingInto(current.units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
@@ -738,7 +868,7 @@ end
 
 local function RecordCleanse(casterGuid, targetGuid, spellId, spellName)
     if not current then
-        if not IsPlayerInCombat() then return end
+        if not ShouldLazyStart() then return end
         StartEncounter()
     end
     RecordCountEventInto(current.units, "cleanses", casterGuid, targetGuid, spellId, spellName)
@@ -747,7 +877,7 @@ end
 
 local function RecordDebuffGiven(casterGuid, targetGuid, spellId, spellName)
     if not current then
-        if not IsPlayerInCombat() then return end
+        if not ShouldLazyStart() then return end
         StartEncounter()
     end
     RecordCountEventInto(current.units, "debuffsGiven", casterGuid, targetGuid, spellId, spellName)
@@ -756,7 +886,7 @@ end
 
 local function RecordInterrupt(casterGuid, targetGuid, spellId, spellName)
     if not current then
-        if not IsPlayerInCombat() then return end
+        if not ShouldLazyStart() then return end
         StartEncounter()
     end
     RecordCountEventInto(current.units, "interrupts", casterGuid, targetGuid, spellId, spellName)
@@ -965,6 +1095,7 @@ CL.Aggregator = {
     RecordDamage = RecordDamage,
     RecordAvoidance = RecordAvoidance,
     RecordHealing = RecordHealing,
+    RecordCast = RecordCast,
     RecordCleanse = RecordCleanse,
     RecordDebuffGiven = RecordDebuffGiven,
     RecordInterrupt = RecordInterrupt,

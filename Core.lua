@@ -66,8 +66,9 @@ CL.defaultSettings = {
     highlightSelfColor = { 1, 0.82, 0 }, -- user-customizable via Options' color picker - gold by default, matching this addon's existing "pay attention to this" accent color
     barBorderEnabled = false, -- border around EVERY bar, in barBorderColor below - independent of highlightSelf, which always wins on your own row regardless of this
     barBorderColor = { 1, 1, 1 }, -- user-customizable via Options' color picker
+    clearOnJoinParty = false, -- auto-resets the Overall segment the moment you go from solo to grouped (party or raid) - see Events.lua's group-change handler
 
-    announcePulls = true, -- "Pull: X (spell)" chat print at the start of a boss/elite encounter - see Aggregator.lua's RecordDamage
+    announcePulls = true, -- "Pull: X (spell)" chat print at the start of a boss encounter (not regular elite trash) - see Aggregator.lua's IsBossTaggedEnemy
 }
 
 -- Defensive rather than relying purely on the load-time "or {}" above:
