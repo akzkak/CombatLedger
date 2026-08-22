@@ -751,10 +751,18 @@ local function RecordCastInto(units, casterGuid, spellId, spellName)
 end
 
 local function RecordCast(casterGuid, spellId, spellName)
-    if not current then
-        if not ShouldLazyStart() then return end
-        StartEncounter()
-    end
+    -- Deliberately does NOT lazy-start like RecordDamage/RecordHealing/
+    -- etc. do - AURA_CAST fires for every buff/heal cast on a tracked
+    -- unit, not just combat spells (confirmed via debug log: a priest's
+    -- routine post-fight Renew, cast well outside ShouldLazyStart's
+    -- 3-second phantom-guard window, was enough to spin up a blank
+    -- encounter and wipe the just-finished Current Fight). A cast alone
+    -- is never real evidence combat resumed, so if there's no already-
+    -- active encounter to tally into, just drop it - the very first
+    -- cast of a fight-opening DoT can undercount by one (falls back to
+    -- matching the tick count in the breakdown window), which is a far
+    -- smaller cost than phantom-restarting on unrelated healing.
+    if not current then return end
     RecordCastInto(current.units, casterGuid, spellId, spellName)
     RecordCastInto(overall.units, casterGuid, spellId, spellName)
 end
@@ -826,10 +834,14 @@ local function RecordHealingInto(units, casterGuid, targetGuid, spellId, spellNa
 end
 
 local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
-    if not current then
-        if not ShouldLazyStart() then return end
-        StartEncounter()
-    end
+    -- Does NOT lazy-start - see RecordCast's comment. Confirmed via
+    -- debug log: a priest's routine post-fight Renew tick, healing the
+    -- raid back up long after ShouldLazyStart's 3-second phantom-guard
+    -- window had already elapsed, phantom-started a blank encounter and
+    -- wiped the just-finished Current Fight. Healing happens constantly
+    -- outside of combat (topping off between pulls) - not valid
+    -- evidence a fight resumed.
+    if not current then return end
     RecordHealingInto(current.units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
     RecordHealingInto(overall.units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
 
@@ -867,10 +879,10 @@ local function RecordCountEventInto(units, bucketKey, casterGuid, targetGuid, sp
 end
 
 local function RecordCleanse(casterGuid, targetGuid, spellId, spellName)
-    if not current then
-        if not ShouldLazyStart() then return end
-        StartEncounter()
-    end
+    -- Does NOT lazy-start - see RecordCast's comment. Dispelling a
+    -- poison/curse/disease off a party member routinely happens outside
+    -- of combat too, so it's not valid evidence a fight resumed.
+    if not current then return end
     RecordCountEventInto(current.units, "cleanses", casterGuid, targetGuid, spellId, spellName)
     RecordCountEventInto(overall.units, "cleanses", casterGuid, targetGuid, spellId, spellName)
 end

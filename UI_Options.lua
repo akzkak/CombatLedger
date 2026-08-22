@@ -21,7 +21,7 @@ CL.UIOptions = OPT
 -- RefreshOptionsWindow reflows resetPosBtn up to sit right after
 -- however many windows actually exist, so this is a ceiling, not what
 -- most people will actually see below their last row.
-local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 604 -- +24 over the prior ceiling for "Clear on join party"'s own row
+local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 628 -- +24 over the prior ceiling for the "Ask before clearing" row (join-party clear is now two checkboxes, not one)
 local MAX_WINDOW_ROWS = 4 -- most people won't run more than 2-3 extra meter windows at once
 local ROW_HEIGHT = 24
 
@@ -640,24 +640,50 @@ local function CreateWindow()
     end)
     f.testCB = testCB
 
-    -- Auto-resets the Overall segment the instant you go from solo to
-    -- grouped (see Events.lua's PARTY_MEMBERS_CHANGED/RAID_ROSTER_UPDATE
-    -- handler) - handy for keeping Overall meaning "this raid" instead
-    -- of carrying over whatever solo grinding happened beforehand.
-    -- Doesn't touch Current Fight or saved History, same as the R
-    -- (Reset) button.
-    local clearOnJoinLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    -- Auto-resets (or offers to reset) the Overall segment the instant
+    -- you go from solo to grouped (see Events.lua's
+    -- PARTY_MEMBERS_CHANGED/RAID_ROSTER_UPDATE handler) - handy for
+    -- keeping Overall meaning "this raid" instead of carrying over
+    -- whatever solo grinding happened beforehand. Doesn't touch Current
+    -- Fight or saved History, same as the R (Reset) button. Two
+    -- checkboxes acting as one 3-way choice (off/always/ask) instead of
+    -- a dropdown - checking one unchecks the other; unchecking the
+    -- active one goes back to off.
+    local clearAlwaysLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     y = NextY()
-    clearOnJoinLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
-    clearOnJoinLabel:SetText("Clear on join party")
-    local clearOnJoinCB = CreateFrame("CheckButton", "CombatLedgerClearOnJoinCB", pageAdvanced, "UICheckButtonTemplate")
-    clearOnJoinCB:SetWidth(20)
-    clearOnJoinCB:SetHeight(20)
-    clearOnJoinCB:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 3)
-    clearOnJoinCB:SetScript("OnClick", function()
-        CL.SetSetting("clearOnJoinParty", (this:GetChecked() == 1))
+    clearAlwaysLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    clearAlwaysLabel:SetText("Always clear on join party")
+    local clearOnJoinAlwaysCB = CreateFrame("CheckButton", "CombatLedgerClearOnJoinAlwaysCB", pageAdvanced, "UICheckButtonTemplate")
+    clearOnJoinAlwaysCB:SetWidth(20)
+    clearOnJoinAlwaysCB:SetHeight(20)
+    clearOnJoinAlwaysCB:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 3)
+    clearOnJoinAlwaysCB:SetScript("OnClick", function()
+        if this:GetChecked() == 1 then
+            CL.SetSetting("clearOnJoinPartyMode", "always")
+            f.clearOnJoinAskCB:SetChecked(false)
+        else
+            CL.SetSetting("clearOnJoinPartyMode", "off")
+        end
     end)
-    f.clearOnJoinCB = clearOnJoinCB
+    f.clearOnJoinAlwaysCB = clearOnJoinAlwaysCB
+
+    local clearAskLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    clearAskLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    clearAskLabel:SetText("Ask before clearing")
+    local clearOnJoinAskCB = CreateFrame("CheckButton", "CombatLedgerClearOnJoinAskCB", pageAdvanced, "UICheckButtonTemplate")
+    clearOnJoinAskCB:SetWidth(20)
+    clearOnJoinAskCB:SetHeight(20)
+    clearOnJoinAskCB:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 3)
+    clearOnJoinAskCB:SetScript("OnClick", function()
+        if this:GetChecked() == 1 then
+            CL.SetSetting("clearOnJoinPartyMode", "ask")
+            f.clearOnJoinAlwaysCB:SetChecked(false)
+        else
+            CL.SetSetting("clearOnJoinPartyMode", "off")
+        end
+    end)
+    f.clearOnJoinAskCB = clearOnJoinAskCB
 
     -- Windows - "main" (this addon's original single window) always
     -- exists and isn't listed here; extra windows are what "+ New
@@ -778,7 +804,8 @@ local function CreateWindow()
             pfUI.api.SkinCheckbox(classColorCB)
             pfUI.api.SkinCheckbox(smoothCB)
             pfUI.api.SkinCheckbox(testCB)
-            pfUI.api.SkinCheckbox(clearOnJoinCB)
+            pfUI.api.SkinCheckbox(clearOnJoinAlwaysCB)
+            pfUI.api.SkinCheckbox(clearOnJoinAskCB)
             pfUI.api.SkinCheckbox(announcePullsCB)
             if matchPfuiCB then pfUI.api.SkinCheckbox(matchPfuiCB) end
             pfUI.api.SkinButton(textureBtn)
@@ -872,7 +899,9 @@ RefreshOptionsWindow = function()
     window.announcePullsCB:SetChecked(CL.GetSetting("announcePulls") ~= false)
 
     window.testCB:SetChecked(CL.testMode)
-    window.clearOnJoinCB:SetChecked(CL.GetSetting("clearOnJoinParty"))
+    local clearMode = CL.GetSetting("clearOnJoinPartyMode")
+    window.clearOnJoinAlwaysCB:SetChecked(clearMode == "always")
+    window.clearOnJoinAskCB:SetChecked(clearMode == "ask")
 
     if window.windowRows then
         local list = (CL.UI and CL.UI.GetWindowList and CL.UI.GetWindowList()) or {}

@@ -444,9 +444,15 @@ f:SetScript("OnEvent", function()
                 CL.UI.ReconcileGroupVisibility()
             end
             local grouped = IsGrouped()
-            if grouped and not wasGrouped and CL.GetSetting("clearOnJoinParty") then
-                CL.Aggregator.ResetOverall()
-                CL.Print("Overall cleared - joined a group.")
+            if grouped and not wasGrouped then
+                local mode = CL.GetSetting("clearOnJoinPartyMode")
+                if mode == "always" then
+                    CL.Aggregator.ResetOverall()
+                    if CL.UI and CL.UI.RefreshAllInstances then CL.UI.RefreshAllInstances() end
+                    CL.Print("Overall cleared - joined a group.")
+                elseif mode == "ask" then
+                    StaticPopup_Show("COMBATLEDGER_CLEAR_ON_JOIN")
+                end
             end
             wasGrouped = grouped
         end

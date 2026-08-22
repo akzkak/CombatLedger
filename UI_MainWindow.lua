@@ -1635,6 +1635,15 @@ function UI.Refresh()
     RefreshInstance(mainInst)
 end
 
+-- Every open window (main + any "+ New Window" extras) at once - used
+-- where a change isn't scoped to just the main window, e.g. clearing
+-- Overall from the join-party prompt below.
+function UI.RefreshAllInstances()
+    for _, inst in pairs(instances) do
+        RefreshInstance(inst)
+    end
+end
+
 -- Called by Threat.lua the moment a fresh threat packet arrives, so
 -- threat bars update immediately instead of waiting for the next
 -- throttled tick - every other mode's data only changes on our own
@@ -1726,6 +1735,21 @@ StaticPopupDialogs["COMBATLEDGER_RESET_OVERALL"] = {
         for _, inst in pairs(instances) do
             RefreshInstance(inst)
         end
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+    exclusive = 1,
+}
+
+StaticPopupDialogs["COMBATLEDGER_CLEAR_ON_JOIN"] = {
+    text = "Clear the Overall segment? You just joined a group.",
+    button1 = "Yes",
+    button2 = "No",
+    OnAccept = function()
+        CL.Aggregator.ResetOverall()
+        UI.RefreshAllInstances()
+        CL.Print("Overall cleared.")
     end,
     timeout = 0,
     whileDead = 1,
