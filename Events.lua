@@ -259,17 +259,48 @@ local function HandleDebuffAdded(guid, spellId)
     CL.Aggregator.RecordDebuffGiven(pending.casterGuid, guid, spellId, SpellName(spellId))
 end
 
--- SPELL_MISS/ENVIRONMENTAL_DMG/DAMAGE_SHIELD/SPELL_ENERGIZE exist in
--- Nampower per its changelog, but their exact argument order isn't
--- documented (unlike AUTO_ATTACK/SPELL_DAMAGE_EVENT/SPELL_HEAL). Log
--- every raw arg instead of guessing at a Handle*-style signature -
--- baking in a wrong interpretation would be worse than not parsing
--- these at all.
+-- SPELL_MISS/ENVIRONMENTAL_DMG/SPELL_ENERGIZE exist in Nampower per its
+-- changelog, but their exact argument order isn't documented (unlike
+-- AUTO_ATTACK/SPELL_DAMAGE_EVENT/SPELL_HEAL). Log every raw arg instead
+-- of guessing at a Handle*-style signature - baking in a wrong
+-- interpretation would be worse than not parsing these at all.
+-- (DAMAGE_SHIELD's shape WAS deciphered this way, from real debug-log
+-- data - see HandleDamageShield below.)
 local function LogRawEvent(tag)
     if not CL.debug then return end
     CL.LogLine(string.format("[RAW %s] a1=%s a2=%s a3=%s a4=%s a5=%s a6=%s a7=%s a8=%s a9=%s",
         tag, tostring(arg1), tostring(arg2), tostring(arg3), tostring(arg4),
         tostring(arg5), tostring(arg6), tostring(arg7), tostring(arg8), tostring(arg9)))
+end
+
+-- DAMAGE_SHIELD_SELF/OTHER - vanilla's own dedicated "damage shield"
+-- reflect event (Thorns, Retribution Aura, Vengeance, etc.), confirmed
+-- via debug log: a1=caster (the unit wearing the reflect buff, dealing
+-- this damage), a2=target (whoever struck them), a3=amount, a4=school.
+-- This is a genuinely separate Nampower signal from SPELL_DAMAGE_EVENT
+-- - no ambiguity about which real ability it was, unlike trying to
+-- infer a reflect proc from a shared spellId. Matches how GreedMeter
+-- itself identifies reflect damage too (vanilla's own DAMAGESHIELD
+-- combat log text, a similarly dedicated signal, just read via chat
+-- parsing instead of this Nampower event). No real spellId comes with
+-- it, so REFLECT_SPELL_ID is a fixed synthetic id used only for this
+-- bucket, named "Reflect" to match GreedMeter's own label.
+local REFLECT_SPELL_ID = -1
+
+local function HandleDamageShield(isSelf, casterGuid, targetGuid, amount, school)
+    amount = tonumber(amount) or 0
+    school = tonumber(school)
+    local relevant = IsRelevant(casterGuid, targetGuid)
+    if relevant then TouchActivity() end
+    if CL.debug then
+        CL.LogLine(string.format(
+            "%s[DAMAGE_SHIELD_%s] caster=%s tgt=%s dmg=%d school=%s",
+            relevant and "" or "[FILTERED] ", isSelf and "SELF" or "OTHER",
+            tostring(casterGuid), tostring(targetGuid), amount, tostring(school)))
+    end
+    if relevant and amount > 0 then
+        CL.Aggregator.RecordDamage(casterGuid, targetGuid, REFLECT_SPELL_ID, "Reflect", school, amount, false, nil, false)
+    end
 end
 
 local autoShownMainWindow = false -- see the PLAYER_ENTERING_WORLD handler below
@@ -504,7 +535,15 @@ f:SetScript("OnEvent", function()
         return
     end
 
-    if event == "SPELL_HEAL_BY_SELF" or event == "SPELL_HEAL_BY_OTHER" or event == "SPELL_HEAL_ON_SELF" then
+    -- SPELL_HEAL_ON_SELF deliberately NOT handled (not even registered
+    -- below) - confirmed via debug log to always double-fire alongside
+    -- whichever BY_* event already covers the same heal (BY_SELF for a
+    -- self-cast heal, BY_OTHER for an incoming heal from someone else -
+    -- both were logging the identical heal twice, once as tgt=player
+    -- caster=X via BY_OTHER, once via ON_SELF). BY_SELF + BY_OTHER
+    -- already cover every possible caster, so ON_SELF is a pure
+    -- duplicate whenever you're the one being healed.
+    if event == "SPELL_HEAL_BY_SELF" or event == "SPELL_HEAL_BY_OTHER" then
         HandleSpellHeal(arg1, arg2, arg3, arg4, arg5, arg6)
         return
     end
@@ -521,9 +560,12 @@ f:SetScript("OnEvent", function()
         return
     end
 
-    if event == "DAMAGE_SHIELD_SELF" or event == "DAMAGE_SHIELD_OTHER" then
-        TouchActivity()
-        LogRawEvent(event)
+    if event == "DAMAGE_SHIELD_SELF" then
+        HandleDamageShield(true, arg1, arg2, arg3, arg4)
+        return
+    end
+    if event == "DAMAGE_SHIELD_OTHER" then
+        HandleDamageShield(false, arg1, arg2, arg3, arg4)
         return
     end
 
@@ -638,7 +680,8 @@ f:RegisterEvent("SPELL_DAMAGE_EVENT_SELF")
 f:RegisterEvent("SPELL_DAMAGE_EVENT_OTHER")
 f:RegisterEvent("SPELL_HEAL_BY_SELF")
 f:RegisterEvent("SPELL_HEAL_BY_OTHER")
-f:RegisterEvent("SPELL_HEAL_ON_SELF")
+-- SPELL_HEAL_ON_SELF not registered - see OnEvent's comment, it's a
+-- confirmed duplicate of BY_SELF/BY_OTHER whenever you're healed.
 f:RegisterEvent("SPELL_MISS_SELF")
 f:RegisterEvent("SPELL_MISS_OTHER")
 f:RegisterEvent("ENVIRONMENTAL_DMG_SELF")

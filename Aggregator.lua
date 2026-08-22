@@ -525,13 +525,26 @@ end
 local function IsBossTaggedEnemy(enemyGuid)
     if not enemyGuid or not UnitClassification then return false end
     local ok, classification = pcall(UnitClassification, enemyGuid)
-    if not ok then return false end
-    if classification == "worldboss" then return true end
-    if classification == "elite" or classification == "rareelite" then
-        local lvlOk, level = pcall(UnitLevel, enemyGuid)
-        return lvlOk and level == -1
+    if not ok then
+        if CL.debug then
+            CL.LogLine(string.format("[BOSS_CHECK] guid=%s UnitClassification pcall failed", tostring(enemyGuid)))
+        end
+        return false
     end
-    return false
+    local isBoss = false
+    local level
+    if classification == "worldboss" then
+        isBoss = true
+    elseif classification == "elite" or classification == "rareelite" then
+        local lvlOk, lvl = pcall(UnitLevel, enemyGuid)
+        level = lvlOk and lvl
+        isBoss = lvlOk and lvl == -1
+    end
+    if CL.debug then
+        CL.LogLine(string.format("[BOSS_CHECK] guid=%s classification=%s level=%s isBoss=%s",
+            tostring(enemyGuid), tostring(classification), tostring(level), tostring(isBoss)))
+    end
+    return isBoss
 end
 
 -- Which melee sub-entry a dmg=0-or-not auto-attack swing belongs in -
