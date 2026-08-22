@@ -280,25 +280,19 @@ end
 -- PLAYER_ENTERING_WORLD/reload comment in Events.lua) - so the
 -- defensive exemption was just leaving this hole open for no real
 -- benefit. All Record* functions use the same guard now.
-local function AnyoneInCombat()
-    local okP, playerCombat = pcall(UnitAffectingCombat, "player")
-    if okP and playerCombat then return true end
-    local raidN = (GetNumRaidMembers and GetNumRaidMembers()) or 0
-    local partyN = (GetNumPartyMembers and GetNumPartyMembers()) or 0
-    local i
-    if raidN > 0 then
-        for i = 1, raidN do
-            local ok, inCombat = pcall(UnitAffectingCombat, "raid" .. i)
-            if ok and inCombat then return true end
-        end
-    end
-    if partyN > 0 then
-        for i = 1, partyN do
-            local ok, inCombat = pcall(UnitAffectingCombat, "party" .. i)
-            if ok and inCombat then return true end
-        end
-    end
-    return false
+--
+-- Checks the PLAYER's own combat flag specifically, NOT the whole
+-- group's - used to check raid/party members too, which reintroduced
+-- the exact bug this guard exists to prevent: your own fight ends
+-- (current freezes into lastFinished), but a groupmate is still
+-- fighting, so their trailing damage/heal event still passed the
+-- "someone's in combat" check and restarted a blank encounter right
+-- on top of your just-finished result. GreedMeter (this addon's own
+-- reference point) ties recording to the player's own personal combat
+-- state exactly like this, not the raid's - matching that.
+local function IsPlayerInCombat()
+    local ok, playerCombat = pcall(UnitAffectingCombat, "player")
+    return ok and playerCombat and true or false
 end
 
 local function GetCurrent()
@@ -561,7 +555,7 @@ end
 
 local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand)
     if not current then
-        if not AnyoneInCombat() then return end
+        if not IsPlayerInCombat() then return end
         StartEncounter()
     end
 
@@ -670,7 +664,7 @@ end
 -- writes into both current and overall like every other Record* call.
 local function RecordAvoidance(casterGuid, targetGuid, victimState, isOffhand)
     if not current then
-        if not AnyoneInCombat() then return end
+        if not IsPlayerInCombat() then return end
         StartEncounter()
     end
     local key = VICTIMSTATE_KEY[victimState] or "other"
@@ -703,7 +697,7 @@ end
 
 local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
     if not current then
-        if not AnyoneInCombat() then return end
+        if not IsPlayerInCombat() then return end
         StartEncounter()
     end
     RecordHealingInto(current.units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
@@ -744,7 +738,7 @@ end
 
 local function RecordCleanse(casterGuid, targetGuid, spellId, spellName)
     if not current then
-        if not AnyoneInCombat() then return end
+        if not IsPlayerInCombat() then return end
         StartEncounter()
     end
     RecordCountEventInto(current.units, "cleanses", casterGuid, targetGuid, spellId, spellName)
@@ -753,7 +747,7 @@ end
 
 local function RecordDebuffGiven(casterGuid, targetGuid, spellId, spellName)
     if not current then
-        if not AnyoneInCombat() then return end
+        if not IsPlayerInCombat() then return end
         StartEncounter()
     end
     RecordCountEventInto(current.units, "debuffsGiven", casterGuid, targetGuid, spellId, spellName)
@@ -762,7 +756,7 @@ end
 
 local function RecordInterrupt(casterGuid, targetGuid, spellId, spellName)
     if not current then
-        if not AnyoneInCombat() then return end
+        if not IsPlayerInCombat() then return end
         StartEncounter()
     end
     RecordCountEventInto(current.units, "interrupts", casterGuid, targetGuid, spellId, spellName)
