@@ -119,7 +119,11 @@ local function CreateWindow()
     f:SetBackdropColor(0, 0, 0, 0.9)
     local themeR, themeG, themeB, themeHex = CL.GetThemeColor()
     f:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)
-    f:SetFrameStrata("DIALOG")
+    -- MEDIUM, same tier as the meter window itself (see UI_MainWindow.
+    -- lua's CreateWindowFrame) - HIGH still rendered above Blizzard's
+    -- own Character/Bags/Quest-dialog panels on this client, same as
+    -- DIALOG did before that.
+    f:SetFrameStrata("MEDIUM")
     f:SetClampedToScreen(true)
     f:SetMovable(true)
     f:EnableMouse(true)

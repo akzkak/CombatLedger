@@ -410,6 +410,22 @@ function CL.NextLowerStrata(strata)
     return "BACKGROUND" -- unrecognized input - safest fallback
 end
 
+-- One tier above whatever strata is passed in - used by CL.ShowDropdown
+-- so a submenu always renders just above whatever button opened it,
+-- regardless of that button's own window's strata, instead of every
+-- dropdown claiming the single topmost TOOLTIP tier unconditionally
+-- (which used to outrank real Blizzard tooltips/frames for no reason
+-- beyond "definitely on top").
+function CL.NextHigherStrata(strata)
+    local i
+    for i = 1, table.getn(CL.STRATA_ORDER) do
+        if CL.STRATA_ORDER[i] == strata then
+            return CL.STRATA_ORDER[math.min(table.getn(CL.STRATA_ORDER), i + 1)]
+        end
+    end
+    return "TOOLTIP" -- unrecognized input - safest fallback (definitely on top)
+end
+
 -- Background alpha for every window's backdrop - only applied while
 -- "Match pfUI" is off (pfUI's own skin governs backdrop appearance
 -- otherwise, so this would have no visible effect and Options greys the
@@ -516,8 +532,9 @@ function CL.ApplyWindowSkin(f, borderR, borderG, borderB, opacityFallback)
             -- see CL.NextLowerStrata's comment for why) so it reliably
             -- sits just behind its own window regardless of frame level,
             -- without leaving a gap other addons' frames can render into
-            -- when f itself is high up the strata order (e.g. the main
-            -- meter window at TOOLTIP).
+            -- when f itself is high up the strata order (e.g. a
+            -- dropdown submenu, dynamically strata'd via
+            -- CL.NextHigherStrata in ShowDropdown).
             f.flatShadow:SetFrameStrata(CL.NextLowerStrata(f:GetFrameStrata()))
             f.flatShadow:SetFrameLevel(1)
             f.flatShadow:SetPoint("TOPLEFT", f, "TOPLEFT", -5, 5)
@@ -612,13 +629,6 @@ function CL.ShowDropdown(anchor, options)
     if not dropdownCatcher then
         dropdownCatcher = CreateFrame("Button", nil, UIParent)
         dropdownCatcher:SetAllPoints(UIParent)
-        -- TOOLTIP - same as the main meter window (its highest possible
-        -- caller). A submenu has to be able to render above whatever
-        -- opened it; FULLSCREEN was fine back when nothing this addon
-        -- created went above FULLSCREEN_DIALOG, but the main window
-        -- moving to TOOLTIP left this (and the dropdown itself, below)
-        -- rendering underneath it instead of on top like a menu should.
-        dropdownCatcher:SetFrameStrata("TOOLTIP")
         dropdownCatcher:SetFrameLevel(1)
         dropdownCatcher:EnableMouse(true)
         dropdownCatcher:RegisterForClicks("LeftButtonUp", "RightButtonUp")
@@ -626,11 +636,9 @@ function CL.ShowDropdown(anchor, options)
     end
     if not dropdownFrame then
         dropdownFrame = CreateFrame("Frame", nil, UIParent)
-        -- Same TOOLTIP strata as the catcher, but a higher frame level -
-        -- same-strata stacking order is decided by frame level, and the
-        -- actual clickable rows need to win that against the full-screen
-        -- catcher sitting right underneath them.
-        dropdownFrame:SetFrameStrata("TOOLTIP")
+        -- Frame LEVEL (not strata - see below) one above the catcher,
+        -- so the actual clickable rows win same-strata stacking order
+        -- against the full-screen catcher sitting right underneath them.
         dropdownFrame:SetFrameLevel(2)
         dropdownFrame:SetBackdrop(CL.WINDOW_BACKDROP)
         dropdownFrame:SetBackdropColor(0.05, 0.05, 0.05, 0.97)
@@ -638,15 +646,34 @@ function CL.ShowDropdown(anchor, options)
         dropdownFrame.rows = {}
     end
 
+    -- Strata is recomputed on every open, one tier above whatever
+    -- opened it right now (anchor's OWN current strata, not a fixed
+    -- constant) - a submenu just needs to beat its own anchor, not
+    -- unconditionally outrank every other addon's UI by sitting at the
+    -- single topmost TOOLTIP tier regardless of context.
+    local dropStrata = CL.NextHigherStrata(anchor:GetFrameStrata())
+    dropdownCatcher:SetFrameStrata(dropStrata)
+    dropdownFrame:SetFrameStrata(dropStrata)
+
     dropdownCatcher:Show()
 
     local ROW_H = 16
     local width = 150
     local count = table.getn(options)
+    local height = count * ROW_H + 6
     dropdownFrame:SetWidth(width)
-    dropdownFrame:SetHeight(count * ROW_H + 6)
+    dropdownFrame:SetHeight(height)
     dropdownFrame:ClearAllPoints()
-    dropdownFrame:SetPoint("TOP", anchor, "BOTTOM", 0, -2)
+    -- Opens upward instead when there isn't room below the anchor to
+    -- fit without running off the bottom of the screen - meter windows
+    -- commonly sit low on screen (a corner HUD), where a downward
+    -- dropdown routinely got clipped/ran past the screen edge.
+    local anchorBottom = anchor:GetBottom() or 0
+    if anchorBottom - height < 10 then
+        dropdownFrame:SetPoint("BOTTOM", anchor, "TOP", 0, 2)
+    else
+        dropdownFrame:SetPoint("TOP", anchor, "BOTTOM", 0, -2)
+    end
 
     local i
     for i = 1, count do

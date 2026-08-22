@@ -874,17 +874,17 @@ local function CreateWindowFrame(inst)
     local themeR, themeG, themeB, themeHex = CL.GetThemeColor()
     f:SetBackdropColor(0, 0, 0, CL.GetBackdropAlpha(0.8))
     f:SetBackdropBorderColor(themeR, themeG, themeB, 1)
-    -- One below the true top (TOOLTIP), not TOOLTIP itself - TOOLTIP is
-    -- reserved exclusively for the dropdown submenu (see Core.lua's
-    -- ShowDropdown). Putting the window there too meant same-strata
-    -- ordering fell to frame level, and the window's own child frames
-    -- (bars, buttons, ...) ended up at a mix of levels relative to the
-    -- dropdown's - some bars rendered above it, some below, producing a
-    -- tangled overlapping mess instead of a clean menu-on-top-of-window.
-    -- FULLSCREEN_DIALOG is still comfortably above virtually all other
-    -- addon UI while leaving TOOLTIP free for the one thing that
-    -- actually needs to render on top of this window itself.
-    f:SetFrameStrata("FULLSCREEN_DIALOG")
+    -- MEDIUM - HIGH still rendered above Blizzard's own Character/Bags/
+    -- Quest-dialog panels on this client (confirmed via screenshot,
+    -- covering CharacterFrame the same way FULLSCREEN_DIALOG did) -
+    -- MEDIUM is what History/Breakdown/EncounterReport already used
+    -- with no such complaint, so this matches those instead. The
+    -- dropdown submenu (Core.lua's ShowDropdown) doesn't need a fixed
+    -- TOOLTIP-always reservation either way - it computes its own
+    -- strata as one tier above whatever anchor opened it, so it still
+    -- reliably renders on top of this window regardless of which tier
+    -- this window itself ends up at.
+    f:SetFrameStrata("MEDIUM")
     f:SetClampedToScreen(true) -- can't be dragged/pushed off-screen, unlike before
     f:SetMovable(true)
     f:EnableMouse(true)
