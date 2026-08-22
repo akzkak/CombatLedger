@@ -62,6 +62,10 @@ CL.defaultSettings = {
     pfuiDock = false, -- dock the main window into pfUI's right chat panel (see UI_PfuiDock.lua) - opt-in, since it moves/resizes the window
     showClassIcon = false, -- class icon before the name on each bar - opt-in, redundant with the existing class-colored bar fill for some tastes
     classColorMenus = false, -- header/dropdown buttons take the player's class color instead of the flat near-black default - see CL.ApplyButtonSkin
+    highlightSelf = false, -- border around whichever bar is the player's own, in highlightSelfColor below - opt-in, some people find a border on every meter distracting
+    highlightSelfColor = { 1, 0.82, 0 }, -- user-customizable via Options' color picker - gold by default, matching this addon's existing "pay attention to this" accent color
+    barBorderEnabled = false, -- border around EVERY bar, in barBorderColor below - independent of highlightSelf, which always wins on your own row regardless of this
+    barBorderColor = { 1, 1, 1 }, -- user-customizable via Options' color picker
 
     announcePulls = true, -- "Pull: X (spell)" chat print at the start of a boss/elite encounter - see Aggregator.lua's RecordDamage
 }

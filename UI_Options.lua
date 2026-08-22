@@ -51,6 +51,50 @@ local function CreateSmallButton(parent, width, text)
     return btn
 end
 
+-- Small color-preview swatch, anchored to the left of a checkbox - click
+-- opens Blizzard's own ColorPickerFrame, previews the live selection as
+-- it changes, and reverts to whatever it was on Cancel (its own Cancel
+-- button, or closing the picker without confirming), same as every
+-- other Blizzard color picker use. Shared by "Highlight my bar" and
+-- "Show bar border" below, which each just pass their own settingKey.
+local function CreateColorSwatch(parent, anchorCB, settingKey, tooltipText)
+    local swatch = CreateFrame("Button", nil, parent)
+    swatch:SetWidth(16)
+    swatch:SetHeight(16)
+    swatch:SetPoint("RIGHT", anchorCB, "LEFT", -8, 0)
+    swatch:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1,
+        insets = { left = -1, right = -1, top = -1, bottom = -1 },
+    })
+    swatch:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)
+    swatch:SetScript("OnClick", function()
+        local color = CL.GetSetting(settingKey)
+        local origR, origG, origB = color[1], color[2], color[3]
+        ColorPickerFrame.func = function()
+            local r, g, b = ColorPickerFrame:GetColorRGB()
+            CL.SetSetting(settingKey, { r, g, b })
+            swatch:SetBackdropColor(r, g, b, 1)
+            if CL.UI and CL.UI.Refresh then CL.UI.Refresh() end
+        end
+        ColorPickerFrame.cancelFunc = function()
+            CL.SetSetting(settingKey, { origR, origG, origB })
+            swatch:SetBackdropColor(origR, origG, origB, 1)
+            if CL.UI and CL.UI.Refresh then CL.UI.Refresh() end
+        end
+        ColorPickerFrame.hasOpacity = nil
+        ColorPickerFrame:SetColorRGB(origR, origG, origB)
+        ShowUIPanel(ColorPickerFrame)
+    end)
+    swatch:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(this, "ANCHOR_LEFT")
+        GameTooltip:SetText(tooltipText)
+        GameTooltip:Show()
+    end)
+    swatch:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return swatch
+end
+
 -- +/- stepper - value display flanked by two small buttons, all anchored
 -- as one unit off the row's TOPRIGHT.
 local function CreateStepper(parent, width)
@@ -319,6 +363,43 @@ local function CreateWindow()
         if CL.UI and CL.UI.Refresh then CL.UI.Refresh() end
     end)
     f.classIconCB = classIconCB
+
+    -- Border around whichever bar is the player's own, in
+    -- highlightSelfColor, so it's obvious at a glance which row is you
+    -- without reading every name.
+    local highlightSelfLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    highlightSelfLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    highlightSelfLabel:SetText("Highlight my bar")
+    local highlightSelfCB = CreateFrame("CheckButton", "CombatLedgerHighlightSelfCB", pageGeneral, "UICheckButtonTemplate")
+    highlightSelfCB:SetWidth(20)
+    highlightSelfCB:SetHeight(20)
+    highlightSelfCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+    highlightSelfCB:SetScript("OnClick", function()
+        CL.SetSetting("highlightSelf", (this:GetChecked() == 1))
+        if CL.UI and CL.UI.Refresh then CL.UI.Refresh() end
+    end)
+    f.highlightSelfCB = highlightSelfCB
+    f.highlightSelfSwatch = CreateColorSwatch(pageGeneral, highlightSelfCB, "highlightSelfColor", "Click to choose the highlight color")
+
+    -- Border around EVERY bar, independent of Highlight my bar above -
+    -- that one always wins gold on your own row regardless of this
+    -- setting/color. Color is user-pickable via Blizzard's own
+    -- ColorPickerFrame - the swatch button previews the current choice.
+    local barBorderLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    barBorderLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    barBorderLabel:SetText("Show bar border")
+    local barBorderCB = CreateFrame("CheckButton", "CombatLedgerBarBorderCB", pageGeneral, "UICheckButtonTemplate")
+    barBorderCB:SetWidth(20)
+    barBorderCB:SetHeight(20)
+    barBorderCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+    barBorderCB:SetScript("OnClick", function()
+        CL.SetSetting("barBorderEnabled", (this:GetChecked() == 1))
+        if CL.UI and CL.UI.Refresh then CL.UI.Refresh() end
+    end)
+    f.barBorderCB = barBorderCB
+    f.barBorderSwatch = CreateColorSwatch(pageGeneral, barBorderCB, "barBorderColor", "Click to choose the border color")
 
     -- Header/dropdown buttons take the player's class color instead of
     -- the flat near-black default - independent of the class icon above
@@ -673,6 +754,8 @@ local function CreateWindow()
             pfUI.api.SkinCheckbox(minimapCB)
             pfUI.api.SkinCheckbox(hideBorderCB)
             pfUI.api.SkinCheckbox(classIconCB)
+            pfUI.api.SkinCheckbox(highlightSelfCB)
+            pfUI.api.SkinCheckbox(barBorderCB)
             pfUI.api.SkinCheckbox(classColorCB)
             pfUI.api.SkinCheckbox(smoothCB)
             pfUI.api.SkinCheckbox(testCB)
@@ -736,6 +819,16 @@ RefreshOptionsWindow = function()
     window.textureBtn.label:SetText(LabelForKey(CL.GetAvailableBarTextures(), CL.GetSetting("barTexture") or "flat") .. " |cff999999v|r")
     window.hideBorderCB:SetChecked(CL.GetSetting("hideBorder"))
     window.classIconCB:SetChecked(CL.GetSetting("showClassIcon"))
+    window.highlightSelfCB:SetChecked(CL.GetSetting("highlightSelf"))
+    do
+        local sc = CL.GetSetting("highlightSelfColor")
+        window.highlightSelfSwatch:SetBackdropColor(sc[1], sc[2], sc[3], 1)
+    end
+    window.barBorderCB:SetChecked(CL.GetSetting("barBorderEnabled"))
+    do
+        local bc = CL.GetSetting("barBorderColor")
+        window.barBorderSwatch:SetBackdropColor(bc[1], bc[2], bc[3], 1)
+    end
     window.classColorCB:SetChecked(CL.GetSetting("classColorMenus"))
     window.fontBtn.label:SetText(LabelForKey(CL.FONTS, CL.GetSetting("fontKey") or "friz") .. " |cff999999v|r")
     window.fontSizeStepper.value:SetText(tostring(CL.GetSetting("fontSize") or 10))

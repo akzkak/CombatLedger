@@ -454,6 +454,26 @@ local function CreateBar(inst, parent, index)
     bg:SetVertexColor(0.15, 0.15, 0.15, 0.85)
     bar.bg = bg
 
+    -- Border overlay (Options: "Show bar border" / "Highlight my bar") -
+    -- a SEPARATE child frame, not a backdrop set directly on bar itself.
+    -- A plain SetBackdrop border on a StatusBar renders on the frame's
+    -- own BACKGROUND layer, same as bar.bg above and the status-bar fill
+    -- texture itself - whichever of those draws last/on top hides most
+    -- of the border, leaving only a sliver visible wherever nothing
+    -- happens to cover it (confirmed via screenshot: only the small
+    -- unfilled strip near valueText showed any color). A child frame
+    -- with a higher FrameLevel composites strictly above everything on
+    -- bar, so the border is always fully visible regardless of fill %.
+    local borderFrame = CreateFrame("Frame", nil, bar)
+    borderFrame:SetAllPoints(bar)
+    borderFrame:SetFrameLevel(bar:GetFrameLevel() + 10)
+    borderFrame:SetBackdrop({
+        edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1,
+        insets = { left = -1, right = -1, top = -1, bottom = -1 },
+    })
+    borderFrame:SetBackdropBorderColor(1, 1, 1, 0)
+    bar.borderFrame = borderFrame
+
     -- Class icon slot - off by default (Options: "Show class icon"),
     -- hidden and unanchored until RefreshInstance decides per-refresh
     -- whether to show it. When it's off, nameText sits exactly where it
@@ -1236,6 +1256,27 @@ RefreshInstance = function(inst)
                     local rate = entry.total / duration
                     bar.valueText:SetText(FormatNumber(entry.total) .. "  (" .. FormatNumber(rate) .. ")")
                 end
+            end
+
+            -- Bar border - two independent Options settings (each with
+            -- its own user-pickable color) sharing one overlay frame
+            -- (see CreateBar). "Highlight my bar" (self only) wins
+            -- whenever it applies, since the whole point is picking your
+            -- own row out at a glance - a same-colored general border
+            -- around every bar would defeat that. Otherwise "Show bar
+            -- border" applies its own color to every row. Neither ever
+            -- applies to the agro marker - it's a reference line, not a
+            -- real player row.
+            if entry.isAgroMarker then
+                bar.borderFrame:SetBackdropBorderColor(1, 1, 1, 0)
+            elseif CL.GetSetting("highlightSelf") and entry.name == UnitName("player") then
+                local sc = CL.GetSetting("highlightSelfColor")
+                bar.borderFrame:SetBackdropBorderColor(sc[1], sc[2], sc[3], 1)
+            elseif CL.GetSetting("barBorderEnabled") then
+                local bc = CL.GetSetting("barBorderColor")
+                bar.borderFrame:SetBackdropBorderColor(bc[1], bc[2], bc[3], 1)
+            else
+                bar.borderFrame:SetBackdropBorderColor(1, 1, 1, 0)
             end
 
             -- Class icon - opt-in (Options: "Show class icon"), and
