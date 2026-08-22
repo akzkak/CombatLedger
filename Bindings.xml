@@ -1,0 +1,5 @@
+<Bindings>
+	<Binding name="COMBATLEDGER_TOGGLE" header="COMBATLEDGER_TITLE">
+		CombatLedger.UI.Toggle()
+	</Binding>
+</Bindings>

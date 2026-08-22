@@ -25,6 +25,13 @@
 CombatLedger = CombatLedger or {}
 local CL = CombatLedger
 
+-- Keybind support - Bindings.xml maps the key to CombatLedger.UI.Toggle()
+-- via this action name; these globals supply the label text shown in
+-- the Blizzard Key Bindings panel (BINDING_HEADER_/BINDING_NAME_ is the
+-- vanilla 1.12 convention, not a CombatLedger-specific mechanism).
+BINDING_HEADER_COMBATLEDGER_TITLE = "CombatLedger"
+BINDING_NAME_COMBATLEDGER_TOGGLE = "Toggle CombatLedger windows"
+
 CombatLedgerDB = CombatLedgerDB or { encounters = {} }
 CombatLedgerDB.encounters = CombatLedgerDB.encounters or {}
 CombatLedgerDB.settings = CombatLedgerDB.settings or {}
