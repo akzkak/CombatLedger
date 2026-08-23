@@ -918,6 +918,27 @@ end
 -- chat - see the file-header note.
 CL.debug = false
 
+-- Restoring CL.debug from CombatLedgerDB.settings.debug (persisted by
+-- /cl debug - see Events.lua) so it's already on by the time
+-- PLAYER_ENTERING_WORLD fires on the NEXT login - that event fires
+-- before there's ever a chance to type /cl debug fresh each session,
+-- which made login-time behavior (e.g. Threat.lua's version handshake)
+-- structurally impossible to capture otherwise. Can't just read
+-- CombatLedgerDB.settings.debug here at top-level like the line above -
+-- this client restores SavedVariables from disk AFTER this file's own
+-- init runs (see EnsureSettingsTable's comment below), so a synchronous
+-- read here would always see the pre-restore default, never the real
+-- saved value. Registered directly in Core.lua (the first file loaded,
+-- per the .toc) specifically so this fires BEFORE any other file's own
+-- PLAYER_ENTERING_WORLD handler that might check CL.debug on the same
+-- event - Threat.lua in particular loads earlier than Events.lua and
+-- fires on this same event too.
+local debugRestoreFrame = CreateFrame("Frame")
+debugRestoreFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+debugRestoreFrame:SetScript("OnEvent", function()
+    CL.debug = (CombatLedgerDB.settings.debug == true)
+end)
+
 -- Session-only (not saved) - fills every meter window with fabricated
 -- data so appearance settings can be previewed without needing to
 -- actually fight something. See Aggregator.lua's GetTestEncounter and

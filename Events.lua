@@ -722,6 +722,13 @@ SlashCmdList["COMBATLEDGER"] = function(msg)
     msg = string.lower(msg or "")
     if msg == "debug" then
         CL.debug = not CL.debug
+        -- Persisted (not just a runtime flag) so it survives a relaunch -
+        -- CL.debug used to always reset to false on load, meaning it was
+        -- structurally impossible to ever capture PLAYER_ENTERING_WORLD's
+        -- own debug output (it fires before you can ever type /cl debug
+        -- on a fresh login). Turn it on once and it stays on for the
+        -- next login too, until toggled off again.
+        CombatLedgerDB.settings.debug = CL.debug
         CL.Print("Debug " .. (CL.debug and "ON" or "OFF"))
     elseif msg == "status" then
         PrintStatus()

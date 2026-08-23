@@ -1,17 +1,35 @@
 --[[
-    Threat - live per-target threat, not built on Nampower/SuperWoW at
-    all. This server answers a plain Blizzard addon message
+    Threat - live per-target threat.
+
+    Primary path: this server answers a plain Blizzard addon message
     ("TWT_UDTSv4") with a reply over CHAT_MSG_ADDON (prefix "TWTv4=")
     containing every group member's current threat against your target -
-    the same protocol TWThreat uses. Since the server is already doing
-    the real threat math, this file is just the request/parse/poll
-    plumbing - no aggregation of our own.
+    the same protocol TWThreat AND KLHThreatMeter both use, confirmed
+    (by reading both addons' actual source, including KLHThreatMeter's
+    dedicated KTM_TWT.lua) to need NOTHING beyond that one request - no
+    handshake, no registration message, nothing addon-specific. Despite
+    that, this addon alone never receives a reply unless TWThreat is
+    ALSO loaded, even though its own code has zero reply-construction
+    logic either (confirmed directly). Best remaining explanation: the
+    server gates replies on the client's real, automatically-reported
+    addon list (a standard vanilla protocol feature, unrelated to any
+    SendAddonMessage content) against a small allowlist of recognized
+    threat addons - not something spoofable from here.
+
+    Fallback path: EstimateThreat() below computes threat locally from
+    CombatLedger's own already-tracked damage/healing data, the same
+    approach GreedMeter's Threat.lua uses (confirmed via its own source -
+    "Uses the server threat addon API when available; otherwise
+    estimates from meter data"). Runs whenever a poll happens but no
+    real reply has landed recently, so the real API (on the rare group
+    that happens to satisfy it) always wins when available.
 
     Threat has no "Overall" or "History" - it's always a live snapshot
-    of whatever the server just reported for the current target, reset
-    the moment the target (or combat state) changes. UI_MainWindow.lua's
-    Threat mode reads CL.Threat.GetSnapshot() directly instead of going
-    through the Current/Overall/segment machinery every other mode uses.
+    of whatever the server just reported (or was last estimated) for the
+    current target, reset the moment the target (or combat state)
+    changes. UI_MainWindow.lua's Threat mode reads CL.Threat.GetSnapshot()
+    directly instead of going through the Current/Overall/segment
+    machinery every other mode uses.
 ]]
 
 local CL = CombatLedger
@@ -21,16 +39,161 @@ local REPLY_PREFIX = "TWTv4="
 local POLL_INTERVAL = 0.5 -- matches TWThreat's own polling cadence
 local REQUEST_LIMIT = 19
 
+-- How long to wait after a poll with no real reply before estimating -
+-- generous enough that a real reply arriving just slightly late (server
+-- hiccup, not "this group doesn't get real replies at all") still wins;
+-- see EstimateThreat below and its call site in the poll loop.
+local ESTIMATE_GRACE = 2
+
+-- [guid] = { name, threat, perc, melee, tank } - declared here (not
+-- down by the roster-scan code below, where these originally lived)
+-- since EstimateThreat, defined next, assigns to all three and Lua's
+-- single-pass compiler needs the local declaration to already be in
+-- scope above any reference to it - a local declared later resolves as
+-- a nonexistent global instead (confirmed the hard way: "attempt to
+-- perform arithmetic on global 'lastUpdate' (a nil value)").
+local current = {}
+local tankGuid = nil
+local lastUpdate = 0
+
+-- ============================================================
+-- Local threat estimation (fallback when no real server reply arrives -
+-- see this file's header comment for why that's needed at all). Ported
+-- from GreedMeter's Threat.lua (same vanilla-classic threat-mechanic
+-- approximations, values reused directly - this is public game-mechanic
+-- data, not anything GreedMeter-specific), adapted to read from
+-- CombatLedger's own Aggregator data instead of GreedMeter's meter
+-- shape.
+-- ============================================================
+
+-- Class baseline threat-generation modifiers (relative, not absolute)
+local CLASS_THREAT_MOD = {
+    WARRIOR = 1.15,
+    PALADIN = 1.10,
+    DRUID   = 1.05,
+    ROGUE   = 0.71,
+    HUNTER  = 0.65,
+    MAGE    = 0.70,
+    WARLOCK = 0.72,
+    PRIEST  = 0.55,
+    SHAMAN  = 0.75,
+}
+
+-- Damage abilities with higher-than-normal threat coefficients (1.12
+-- approximations) - applied to that spell's damage total already
+-- tracked in Aggregator's per-spell breakdown.
+local SPELL_DAMAGE_THREAT_MULT = {
+    ["Mind Blast"] = 2.00,
+    ["Searing Pain"] = 2.00,
+    ["Shield Slam"] = 1.50,
+    ["Revenge"] = 2.00,
+    ["Maul"] = 1.75,
+    ["Heroic Strike"] = 1.25,
+    ["Cleave"] = 1.15,
+    ["Thunder Clap"] = 1.75,
+    ["Mocking Blow"] = 2.50,
+    ["Holy Shield"] = 1.30,
+    ["Lacerate"] = 1.30,
+    ["Devastate"] = 1.50,
+}
+
+local function SpellDamageThreatMult(spell)
+    if not spell or spell == "" then return 1.0 end
+    local m = SPELL_DAMAGE_THREAT_MULT[spell]
+    if m then return m end
+    local key, mult
+    for key, mult in pairs(SPELL_DAMAGE_THREAT_MULT) do
+        if string.find(spell, key, 1, true) then
+            return mult
+        end
+    end
+    return 1.0
+end
+
+-- Compute one player's estimated threat from their Aggregator unit
+-- entry (damageDone/healingDone, already tracked for the meter itself -
+-- no separate data collection needed). Healing counted at ~0.5x
+-- effective heal, matching classic-era threat mechanics.
+local function EstimateUnitThreat(u)
+    if not u then return 0 end
+    local mod = 1.0
+    if u.classToken and CLASS_THREAT_MOD[u.classToken] then
+        mod = CLASS_THREAT_MOD[u.classToken]
+    end
+
+    local dmgThreat = 0
+    if u.damageDone and u.damageDone.spells then
+        local spellId, entry
+        for spellId, entry in pairs(u.damageDone.spells) do
+            dmgThreat = dmgThreat + (entry.total or 0) * SpellDamageThreatMult(entry.name)
+        end
+    end
+    -- Melee entries live outside .spells (see Aggregator.lua's
+    -- MeleeEntryFor) - fold in at the plain 1x rate.
+    if u.damageDone then
+        if u.damageDone.melee then dmgThreat = dmgThreat + (u.damageDone.melee.total or 0) end
+        if u.damageDone.offhand then dmgThreat = dmgThreat + (u.damageDone.offhand.total or 0) end
+    end
+
+    local healThreat = 0
+    if u.healingDone then
+        healThreat = (u.healingDone.total or 0) * 0.5
+    end
+
+    return (dmgThreat + healThreat) * mod
+end
+
+-- Populates current/tankGuid from CombatLedger's own live encounter
+-- data (CL.Aggregator.GetCurrent().units) instead of a server reply.
+-- Same output shape HandleThreatPacket produces, so the UI needs no
+-- changes to consume either source.
+local function EstimateThreat()
+    local enc = CL.Aggregator and CL.Aggregator.GetCurrent and CL.Aggregator.GetCurrent()
+    if not enc or not enc.units then return false end
+
+    local newCurrent = {}
+    local maxThreat = 0
+    local guid, u
+    for guid, u in pairs(enc.units) do
+        local threat = EstimateUnitThreat(u)
+        if threat > 0 then
+            newCurrent[guid] = { name = u.name or guid, threat = threat, estimated = true }
+            if threat > maxThreat then maxThreat = threat end
+        end
+    end
+
+    if maxThreat <= 0 then return false end
+
+    local newTank = nil
+    local maxSeen = 0
+    for guid, entry in pairs(newCurrent) do
+        entry.perc = math.floor((entry.threat / maxThreat) * 100 + 0.5)
+        entry.melee = false
+        entry.tank = false
+        if entry.threat > maxSeen then
+            maxSeen = entry.threat
+            newTank = guid
+        end
+    end
+    if newTank then newCurrent[newTank].tank = true end
+
+    current = newCurrent
+    tankGuid = newTank
+
+    if CL.debug then
+        CL.LogLine("[Threat] estimated " .. CL.TableCount(newCurrent) .. " players (no real reply for " ..
+            string.format("%.1f", GetTime() - lastUpdate) .. "s)")
+    end
+
+    if CL.UI and CL.UI.RefreshMode then CL.UI.RefreshMode("threat") end
+    return true
+end
+
 -- [name] = guid, from a party/raid roster scan (SuperWoW's UnitExists
 -- returns a real GUID as a third value - see GuidCache.lua for the same
 -- trick) - threat packets only ever name party/raid members, so this is
 -- always resolvable as long as the roster scan has run recently.
 local nameToGuid = {}
-
--- [guid] = { name, threat, perc, melee, tank }
-local current = {}
-local tankGuid = nil
-local lastUpdate = 0
 
 -- Set the moment the target changes, cleared the moment a fresh reply
 -- lands. While set, the OLD target's bars are left showing rather than
@@ -153,7 +316,12 @@ local f = CreateFrame("Frame")
 f:RegisterEvent("CHAT_MSG_ADDON")
 f:RegisterEvent("PARTY_MEMBERS_CHANGED")
 f:RegisterEvent("RAID_ROSTER_UPDATE")
+f:RegisterEvent("PLAYER_ENTERING_WORLD")
 f:SetScript("OnEvent", function()
+    if event == "PLAYER_ENTERING_WORLD" then
+        RefreshRosterNames()
+        return
+    end
     if event == "CHAT_MSG_ADDON" then
         -- arg1 = prefix, arg2 = message, arg3 = channel, arg4 = sender.
         -- The reply's real addon-message prefix (arg1) isn't "TWTv4="
@@ -233,6 +401,13 @@ f:SetScript("OnUpdate", function()
 
     if polling then
         RequestThreat()
+        -- Real reply always wins when it arrives (HandleThreatPacket
+        -- overwrites current/lastUpdate unconditionally) - this only
+        -- fires when nothing real has landed recently, so a group that
+        -- DOES get real replies never sees estimated numbers at all.
+        if (GetTime() - lastUpdate) > ESTIMATE_GRACE then
+            EstimateThreat()
+        end
     elseif wasPolling then
         -- Target/combat state dropped since the last poll - clear
         -- rather than leave a stale snapshot from whatever was
