@@ -3,18 +3,11 @@
 
     Primary path: this server answers a plain Blizzard addon message
     ("TWT_UDTSv4") with a reply over CHAT_MSG_ADDON (prefix "TWTv4=")
-    containing every group member's current threat against your target -
-    the same protocol TWThreat AND KLHThreatMeter both use, confirmed
-    (by reading both addons' actual source, including KLHThreatMeter's
-    dedicated KTM_TWT.lua) to need NOTHING beyond that one request - no
-    handshake, no registration message, nothing addon-specific. Despite
-    that, this addon alone never receives a reply unless TWThreat is
-    ALSO loaded, even though its own code has zero reply-construction
-    logic either (confirmed directly). Best remaining explanation: the
-    server gates replies on the client's real, automatically-reported
-    addon list (a standard vanilla protocol feature, unrelated to any
-    SendAddonMessage content) against a small allowlist of recognized
-    threat addons - not something spoofable from here.
+    containing group members' current threat against your target. This
+    is the same request/reply protocol TWThreat uses; it needs no addon
+    handshake or registration message. The request limit must stay in
+    TWThreat's supported range: TWThreat exposes 5-11 visible bars and
+    requests visibleBars - 1, so the largest valid request is 10.
 
     Fallback path: EstimateThreat() below computes threat locally from
     CombatLedger's own already-tracked damage/healing data, the same
@@ -37,7 +30,9 @@ local CL = CombatLedger
 local REQUEST_PREFIX = "TWT_UDTSv4"
 local REPLY_PREFIX = "TWTv4="
 local POLL_INTERVAL = 0.5 -- matches TWThreat's own polling cadence
-local REQUEST_LIMIT = 19
+-- TWThreat caps visibleBars at 11 and sends visibleBars - 1. Values above
+-- 10 can be silently ignored by the server, leaving only local estimates.
+local REQUEST_LIMIT = 10
 
 -- How long to wait after a poll with no real reply before estimating -
 -- generous enough that a real reply arriving just slightly late (server
@@ -455,9 +450,12 @@ end
 local function RequestThreat()
     local channel = GroupChannel()
     if not channel then return end
-    local ok, err = pcall(SendAddonMessage, REQUEST_PREFIX, "limit=" .. REQUEST_LIMIT, channel)
+    local requestBody = "limit=" .. REQUEST_LIMIT
+    local ok, err = pcall(SendAddonMessage, REQUEST_PREFIX, requestBody, channel)
     if CL.debug then
-        CL.LogLine("[Threat] request sent prefix=" .. REQUEST_PREFIX .. " channel=" .. channel .. " ok=" .. tostring(ok) .. (ok and "" or (" err=" .. tostring(err))))
+        CL.LogLine("[Threat] request sent prefix=" .. REQUEST_PREFIX ..
+            " body=" .. requestBody .. " channel=" .. channel .. " ok=" .. tostring(ok) ..
+            (ok and "" or (" err=" .. tostring(err))))
     end
 end
 
