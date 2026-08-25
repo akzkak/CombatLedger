@@ -1239,8 +1239,18 @@ RefreshInstance = function(inst)
                 bar.valueText:SetText("+" .. FormatNumber(entry.total))
             elseif isThreat then
                 rank = rank + 1
-                local r, g, b = ClassColor(entry.classToken)
-                bar:SetStatusBarColor(r, g, b, 0.9)
+                -- TWThreat makes the player's own row solid red instead
+                -- of another class-colored bar, which is much easier to
+                -- find at a glance in a moving threat list. Keep this
+                -- unconditional treatment inside Threat mode only;
+                -- Damage/Healing/etc. retain their existing class colors
+                -- and optional user-configured self border below.
+                if entry.name == UnitName("player") then
+                    bar:SetStatusBarColor(1, 0.2, 0.2, 1)
+                else
+                    local r, g, b = ClassColor(entry.classToken)
+                    bar:SetStatusBarColor(r, g, b, 0.9)
+                end
                 bar.nameText:SetText(rank .. ". " .. (entry.tank and "|cffFFD100[T]|r " or "") .. entry.name)
                 bar.valueText:SetText(FormatNumber(entry.total) .. "  (" .. (entry.perc or 0) .. "%)")
             else
