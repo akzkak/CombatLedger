@@ -118,11 +118,9 @@ function CL.TryRegisterPfuiDock()
     return true
 end
 
--- Undoing a live registration isn't supported by pfUI's own API (there's
--- no UnregisterMeter) - same limitation GreedMeter's own integration
--- has, hence its "/reload to fully clear dock slots" messaging. This
--- just restores the window to a normal floating frame; the dock slot
--- itself stays claimed until the next reload.
+-- pfUI has no way to unregister a docked meter, so undocking only
+-- restores the window to a floating frame; the dock slot stays claimed
+-- until the next /reload.
 function CL.UndockFromPfui()
     local f = GetMainFrame()
     if f then
@@ -136,9 +134,8 @@ function CL.UndockFromPfui()
     end
 end
 
--- Same delayed-retry shape as GreedMeter's own integration - pfUI's
--- chat panel (pfUI.chat.right) may not exist yet the instant this file
--- executes, even once IsAddOnLoaded("pfUI") is already true.
+-- Delayed: pfUI's chat panel (pfUI.chat.right) may not exist yet when
+-- this file runs, even with pfUI loaded.
 local delayFrame = CreateFrame("Frame")
 local elapsed = 0
 delayFrame:SetScript("OnUpdate", function()

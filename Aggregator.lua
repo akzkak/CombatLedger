@@ -1,79 +1,66 @@
 --[[
-    Aggregator - encounter lifecycle and per-unit/per-spell recording.
+    Aggregator - encounter lifecycle and all recorded combat data.
 
-    One data shape for the live encounter, the session-long "Overall"
-    accumulator, and saved history, so the breakdown window can render
-    any of them without duplicate code:
+    The live encounter (`current`), the session-long Overall (`overall`)
+    and saved History entries share one shape, so every window renders
+    any of them with the same code:
 
         encounter = {
-            label, zone, startTime, timestamp, duration,
+            label, zone, startTime, timestamp, duration, isBoss, pullBy,
+            series,                          -- per-2s raid totals for the report graph
             units = {
-                [guid] = {
-                    name, class, isPlayer,
-                    damageDone  = { total, spells = { [spellId] = {name, school, hits, crits, total, min, max} }, melee = {hits, crits, total, min, max} },
-                    healingDone = { total (effective), raw, overheal, unverified, spells = { ... } },
-                    damageTaken = { total, spells = { ... }, melee = { ... } },
-                    deaths,
+                [guid] = {                   -- roster members only; pets merge into owners (option)
+                    name, class, classToken, isPlayer, deaths,
+                    damageDone  = bucket,    -- see NewBucket
+                    damageTaken = bucket,    -- .targets = attackers
+                    healingDone = { total (effective), raw, overheal, unverified, spells, targets },
+                    cleanses, debuffsGiven = { total (count), spells, targets },
                 },
             },
         }
 
-    Melee (spellId == nil) is recorded into `.melee` instead of `.spells`
-    so it doesn't need a fake spell ID.
+    A bucket holds total, spells[spellId], melee/offhand/petMelee/
+    petOffhand entries (auto-attacks have no spellId), per-target
+    sub-buckets of the same shape, and optional spellMisses/mit tables.
 
-    Every Record* call writes into BOTH `current` (the live fight, reset
-    per encounter) and `overall` (a running total since login/last
-    manual reset) - two independent unit tables receiving the same
-    events, not one feeding the other.
+    Every Record* writes into both `current` and `overall`: two
+    independent unit tables fed the same events. Record* functions are the
+    only mutators and each bumps dataVersion (see GetDataVersion).
 ]]
 
 local CL = CombatLedger
 
 local current = nil -- the live encounter, or nil if not in one
 
--- Bumped by every mutator below (Record*, encounter start/end, resets,
--- restore) - UI_MainWindow.lua's refresh loop skips redrawing a window
--- whose data hasn't changed since it last drew. May over-count (a
--- Record* that ends up filtering its event out still bumps it), never
--- under-count, which is the safe direction.
+-- Bumped by every mutator (Record*, encounter start/end, resets,
+-- restore); the UI skips redrawing windows whose data hasn't changed.
+-- May over-count (a Record* that filters its event out still bumps it),
+-- never under-count.
 local dataVersion = 0
 
--- startTime uses GetTime() (session-relative float, matches what the live
--- meter and PrintStatus subtract it against for elapsed/DPS math) - not
--- time() (epoch seconds): a time()-based startTime would make
--- GetTime() - startTime a huge negative number, silently pinning every
--- live duration read to the "<= 0" fallback of 1 second forever.
+-- startTime is GetTime() (what every elapsed/rate calculation subtracts
+-- from); startTimeReal is wall-clock time() for RestoreState's
+-- staleness check.
 local function NewEncounter()
     return {
         label = nil,
         zone = (GetRealZoneText and GetRealZoneText()) or "",
         startTime = GetTime(),
-        -- Wall-clock companion to startTime, used only by RestoreState's
-        -- staleness check below - see that comment for why GetTime()
-        -- alone isn't safe there.
         startTimeReal = time(),
         units = {},
         activeDuration = 0, -- only meaningful for `overall` (see GetOverallDuration) - sum of finished encounters' durations, so idle time between pulls doesn't dilute Overall DPS
         pullBy = nil, -- { name, label } - set once, from whoever's action started this encounter
         mobTally = {}, -- [guid] = damage dealt to it by tracked casters - label-only, not a real bar entry (mobs are deliberately excluded from units)
         mobHealth = {}, -- [guid] = UnitHealthMax(guid), sampled once per mob - label-only, same reasoning as mobTally (see History.lua's ComputeLabel)
-        -- Raid-wide shape-of-the-fight, for UI_EncounterReport's graph.
-        -- Fixed-width time buckets (see RecordSeriesPoint), not a raw
-        -- per-event log: a whole fight's worth of events at ~2500 events/
-        -- encounter x up to 50 saved encounters would make
-        -- CombatLedgerDB.lua noticeably bloat and slow to parse on
-        -- login, where a bucketed series stays a few hundred small
-        -- tables even for a long fight. The cost is that the report
-        -- can't scrub to "what exactly landed at 1:23" the way a full
-        -- event log could - only the live DeathRecap buffer keeps that
-        -- level of per-event detail, and only for the last 10s per unit.
+        -- Raid-wide damage/healing/taken per fixed time bucket, for
+        -- UI_EncounterReport's graph. Bucketed rather than a per-event
+        -- log so saved encounters stay small.
         series = {},
     }
 end
 
--- One shared bucket width for every encounter's series - only current
--- (not overall) ever gets buckets recorded into it, since Overall isn't
--- a single bounded fight and graphing "since login" wouldn't mean much.
+-- Series bucket width. Only `current` records a series; Overall isn't a
+-- single fight to graph.
 local TIMELINE_BUCKET_SECONDS = 2
 
 local function RecordSeriesPoint(enc, kind, amount)
@@ -91,11 +78,9 @@ end
 
 local overall = NewEncounter() -- long-lived; only cleared by ResetOverall()
 
--- Death recap: a short rolling per-unit hit history, independent of the
--- aggregated totals above - "what actually killed me in the last few
--- seconds", which needs the raw sequence, not a sum. Nampower's GUID
--- resolution is what makes attributing each hit to a real attacker name
--- reliable here; chat-text parsing can't do this nearly as cleanly.
+-- Death recap: a rolling RECAP_WINDOW-second list of hits taken per
+-- tracked unit (the raw sequence, not totals), snapshotted on death.
+-- Session only - not saved with encounters.
 local RECAP_WINDOW = 10 -- seconds of history kept per tracked unit
 local recapBuffers = {} -- [guid] = { {time, attacker, label, amount, isCrit}, ... }, oldest first
 local lastDeathRecap = {} -- [guid] = { deathTime, hits = {...snapshot...} }
@@ -134,12 +119,9 @@ local function NewAvoided()
     return { miss = 0, dodge = 0, parry = 0, block = 0, evade = 0, immune = 0, deflect = 0, other = 0 }
 end
 
--- Avoidance only ever applies to melee (see RecordAvoidance - AUTO_ATTACK
--- is the only source of it on this server), so it lives on the
--- melee/petMelee entry itself rather than the whole bucket - that's what
--- lets the breakdown window's hover show "this ability's" own dodge/
--- parry/miss numbers instead of a bucket-wide total that doesn't
--- actually belong to any one ability.
+-- Melee entries carry their own avoidance counts (white-swing outcomes
+-- from AUTO_ATTACK), so each melee row can show its own miss/dodge/parry
+-- rates. Spell misses are kept separately in bucket.spellMisses.
 local function NewMeleeEntry()
     return { hits = 0, crits = 0, total = 0, critTotal = 0, min = nil, max = nil, avoided = NewAvoided() }
 end
@@ -149,28 +131,21 @@ local function NewBucket()
         total = 0,
         spells = {},
         melee = NewMeleeEntry(),
-        -- Off-hand swings carry hitInfo's 0x04 bit same as everything
-        -- else, so a dual-wielder's off-hand is trackable as its own
-        -- line rather than blending into "Melee".
+        -- Off-hand swings, kept apart from main-hand (different hit caps).
         offhand = NewMeleeEntry(),
-        -- Pet melee is bucketed separately from the owner's own melee -
-        -- both roll into the same unit/total (see AttributedGuid), but a
-        -- caster's "Auto Attack" line showing pet swings they never threw
-        -- themselves is misleading in the breakdown window.
+        -- A merged pet's swings: same unit total as the owner, but its own
+        -- breakdown row rather than inflating the owner's "Auto Attack".
         petMelee = NewMeleeEntry(),
         petOffhand = NewMeleeEntry(),
-        -- Only populated for damageDone: who this damage actually landed
-        -- on, [targetGuid] = { name, total, hits } - lets the breakdown
-        -- window answer "did this damage go to the boss, or somewhere
-        -- else" (padding on trash instead of the actual target).
+        -- Per-target sub-buckets (EnsureTargetEntry): who the damage
+        -- landed on (damageDone) or came from (damageTaken).
         targets = {},
     }
 end
 
--- Pets roll up under their owner's bar (a Hunter's or Warlock's pet
--- damage reads as "theirs" in every real meter) rather than showing as
--- a separate row - redirect the guid used for bucketing, but only that;
--- IsRelevant/roster checks elsewhere still key off the pet's own guid.
+-- The unit a guid's data is recorded under: its owner while "Merge pets
+-- into owners" is on, itself otherwise. Only bucketing uses this;
+-- relevance/roster checks use the pet's own guid.
 local function AttributedGuid(guid)
     if CL.GetSetting("mergePets") == false then return guid end
     if CL.GuidCache and CL.GuidCache.GetOwner then
@@ -190,42 +165,14 @@ local function EnsureUnit(units, guid)
             classToken = info and info.classToken,
             isPlayer = info and info.isPlayer,
             damageDone = NewBucket(),
-            -- `targets` here is who was healed (recipients), same idea
-            -- as damageDone.targets - lets the breakdown window answer
-            -- "who did this healing actually go to" the same way it
-            -- already answers "who did this damage actually go to".
+            -- targets = who was healed.
             healingDone = { total = 0, overheal = 0, spells = {}, targets = {} },
             damageTaken = NewBucket(),
-            -- Dispels/cleanses - total is a COUNT (not an amount), same
-            -- bucket shape (spells/targets) as everything else so the
-            -- breakdown window's generic code works unmodified. Built on
-            -- SPELL_DISPEL_BY_SELF/OTHER (casterGuid, targetGuid,
-            -- spellId), not text parsing, so there's no cast/fade
-            -- correlation heuristic needed to avoid miscounting a
-            -- natural expiration.
+            -- Dispels: total is a count; spells are the auras removed.
             cleanses = { total = 0, spells = {}, targets = {} },
-            -- Debuffs given - same count-only shape as cleanses. Built
-            -- by correlating AURA_CAST_ON_* (has caster+target, no
-            -- reliable buff/debuff classification) with the immediately-
-            -- following DEBUFF_ADDED_* (has the reliable classification,
-            -- no caster) by matching (targetGuid, spellId) - see
-            -- Events.lua's correlation buffer. Buffs Given was built the
-            -- same way but is hidden: prebuffing happens out of combat,
-            -- before the encounter it was for even starts, so it
-            -- doesn't fit this addon's per-encounter model; a live
-            -- "which raid buffs is each person missing" checker is a
-            -- different, deferred feature.
+            -- Debuffs given: a count, from Events.lua's AURA_CAST +
+            -- DEBUFF_ADDED correlation.
             debuffsGiven = { total = 0, spells = {}, targets = {} },
-            -- Interrupts - same count-only shape again, built on two
-            -- separate signals (see Events.lua): a TRUE signal for melee
-            -- "special attack" interrupts (Kick/Pummel) via AUTO_ATTACK's
-            -- victimState field, and a known-spell-name heuristic for
-            -- pure spell-cast interrupts (Counterspell/Spell Lock, which
-            -- deal no damage and have no dedicated interrupt event from
-            -- Nampower - same tradeoff GreedMeter's own interrupt tracker
-            -- accepts, just built on a structured SPELL_GO landing
-            -- instead of parsing a chat message).
-            interrupts = { total = 0, spells = {}, targets = {} },
             deaths = 0,
         }
         units[guid] = u
@@ -239,10 +186,7 @@ local function EnsureSpellEntry(spells, spellId, name, school)
         s = { name = name, school = school, hits = 0, crits = 0, total = 0, critTotal = 0, min = nil, max = nil }
         spells[spellId] = s
     else
-        -- RecordCast can create this entry first (a DoT's AURA_CAST
-        -- fires before its first tick), with no school known yet -
-        -- backfill once real damage data supplies it, instead of
-        -- leaving it permanently nil.
+        -- Fill in fields an earlier, less informed caller left empty.
         if name and not s.name then s.name = name end
         if school and not s.school then s.school = school end
     end
@@ -260,18 +204,10 @@ local function RecordHit(entry, amount, isCrit)
     if not entry.max or amount > entry.max then entry.max = amount end
 end
 
--- Lazily creates a same-shaped sub-bucket on a spell entry, keyed
--- "directHits" or "tickHits" - see RecordDamageInto's isPeriodic
--- threading. Kept entirely separate from (and additive to) the spell
--- entry's own top-level RecordHit call, which stays the combined
--- hit+tick total exactly as before - nothing that already reads
--- entry.total/.hits/.min/.max (bar sorting, DPS math, "Top Ability")
--- needs to change or even know this split exists. This is purely for
--- UI_BreakdownWindow.lua to show separate Hits/Ticks lines under a
--- spell that has both, since a DoT tick can never crit but its
--- initial hit can - mixing the two into one min/max produced reports
--- that read as "weird" (e.g. Rake/Immolate) without ever actually
--- being wrong, just conflating two different kinds of numbers.
+-- A spell entry's "directHits"/"tickHits" sub-entry. These are extra
+-- detail recorded alongside the entry's combined totals (which everything
+-- else reads), so the breakdown can show a spell's direct hits and DoT
+-- ticks separately - a direct hit can crit, a tick can't.
 local function EnsureSplitBucket(entry, key)
     local b = entry[key]
     if not b then
@@ -298,34 +234,13 @@ local function StartEncounter()
     end
 end
 
--- Guards every Record*'s lazy "if not current then StartEncounter()" -
--- without this, a stray post-combat event (a HoT finishing its last
--- tick, a top-off heal, a DoT's last tick landing late, splash damage
--- from something already resolved) spins up a brand new BLANK encounter
--- out of thin air the moment the real fight's encounter has already
--- ended, purely because something still called Record* after current
--- went nil. Since UI_MainWindow.lua's "Current Fight" display prefers
--- current over the frozen lastFinished the instant current exists again
--- (see GetCurrentDisplay below), that phantom encounter doesn't just
--- sit there quietly - it immediately overwrites the just-finished
--- fight's summary with an empty one, which is exactly what looked like
--- "the stop isn't instant" (the fight really did end fine; a trailing
--- event just erased the result a moment later).
---
--- Used to be skipped for RecordDamage/RecordAvoidance/RecordInterrupt/
--- RecordDebuffGiven specifically, on the theory that gating on combat
--- risked dropping the first hit of a fresh pull if UnitAffectingCombat
--- hadn't flipped true yet. That theory DID pan out after all, confirmed
--- via debug log against a training dummy: dummies here don't reliably
--- flip the player's own combat flag at all, so gating unconditionally
--- on it dropped a real spell's entire initial hit (Immolate's opening
--- burn, 334 of its 1044 total) every single time - the encounter's
--- FIRST event is exactly the one this guard can't afford to reject.
---
--- An encounter only ends once the player AND the whole group (pets
--- included) are out of combat (see Events.lua's debounced end), so a
--- groupmate still being in combat right after an end means a genuinely
--- new pull, not a trailing event from the old one.
+-- Lazy start: Record* functions may start an encounter themselves when
+-- none is live, since the first hit can arrive before (or, against
+-- training dummies, without) PLAYER_REGEN_DISABLED. The danger is a
+-- trailing event after a fight (a last DoT tick, a top-off heal) starting
+-- a blank encounter that replaces the just-finished one in Current
+-- Fight. Encounters only end once the player and the whole group are out
+-- of combat, so anyone still fighting means a genuinely new pull.
 local function IsPlayerInCombat()
     local ok, playerCombat = pcall(UnitAffectingCombat, "player")
     return ok and playerCombat and true or false
@@ -335,12 +250,10 @@ local function IsGroupFighting()
     return IsPlayerInCombat() or (CL.GuidCache and CL.GuidCache.AnyGroupMemberInCombat())
 end
 
--- The guard every damage-style Record*'s lazy "if not current then
--- StartEncounter()" uses. Allow when the player or group is fighting,
--- or when it's been a while since the last end (training dummies may
--- never flag combat at all); only refuse in the narrow window right
--- after an end, where an unflagged hit is far more likely a trailing
--- tick than a real new pull.
+-- Guard for damage-style events: allow when the player or group is
+-- fighting, or when the last end was more than PHANTOM_GUARD_WINDOW ago
+-- (dummies may never flag combat). Refuse only just after an end, where
+-- an unflagged hit is most likely a trailing tick.
 local PHANTOM_GUARD_WINDOW = 3 -- seconds after a fight ends where an unflagged hit is treated as a trailing event, not a new pull
 local function ShouldLazyStart()
     if IsGroupFighting() then return true end
@@ -354,11 +267,8 @@ local function GetCurrent()
     return current
 end
 
--- What "Current Fight" should actually display: the live encounter
--- while one's running, otherwise the last one that finished (frozen,
--- not cleared) until the next pull starts. Without this, Current Fight
--- would go blank the instant the grace/idle timeout ends the encounter,
--- rather than staying up to review like Details/Skada do.
+-- What "Current Fight" shows: the live encounter, or the last finished
+-- one (kept for review) until the next pull starts.
 local function GetCurrentDisplay()
     return current or lastFinished
 end
@@ -372,13 +282,8 @@ local function ResetOverall()
     overall = NewEncounter()
 end
 
--- Defensive backfill for a unit restored from SavedVariables - a save
--- written before some field existed (e.g. cleanses/debuffsGiven, or the
--- .targets recipient tracking added onto healingDone/damageTaken) would
--- otherwise nil-index the first time a Record* call touches that field.
--- Same "new fields need defensive re-init" pattern as
--- CL.GetSetting/CL.GetLayout's EnsureXTable in Core.lua, just per-unit
--- instead of per-SavedVariable.
+-- Adds fields that saves from older versions may lack, so Record* can
+-- write into a restored unit without nil checks.
 local function BackfillUnit(u)
     if not u.damageDone then u.damageDone = NewBucket() end
     if not u.damageDone.targets then u.damageDone.targets = {} end
@@ -388,16 +293,12 @@ local function BackfillUnit(u)
     if not u.damageTaken.targets then u.damageTaken.targets = {} end
     if not u.cleanses then u.cleanses = { total = 0, spells = {}, targets = {} } end
     if not u.debuffsGiven then u.debuffsGiven = { total = 0, spells = {}, targets = {} } end
-    if not u.interrupts then u.interrupts = { total = 0, spells = {}, targets = {} } end
     if not u.deaths then u.deaths = 0 end
 end
 
 local function BackfillEncounter(enc)
     if not enc then return end
-    -- Encounter-level scratch fields added after this encounter may not
-    -- have been serialized (mobHealth) - without this, a `current`
-    -- restored across a /reload from an older save would nil-index the
-    -- moment RecordDamage's health sampler touched it.
+    -- Encounter-level fields older saves may lack.
     if not enc.mobTally then enc.mobTally = {} end
     if not enc.mobHealth then enc.mobHealth = {} end
     if not enc.series then enc.series = {} end
@@ -408,12 +309,6 @@ local function BackfillEncounter(enc)
     end
 end
 
--- Saved to CombatLedgerDB.liveState on PLAYER_LOGOUT (which vanilla also
--- fires on /reload, not just a real logout) and restored on the next
--- PLAYER_ENTERING_WORLD - see Events.lua. Without this, a mid-raid
--- /reload would silently wipe the in-progress fight and the whole
--- session's Overall totals back to zero, since current/overall only
--- exist as Lua locals otherwise.
 -- Adds src's numbers into dst, recursively (spells, melee entries,
 -- avoided/mit/spellMisses sub-tables all nest the same way). min/max
 -- combine as min/max; `school` is an id, not a count, so it's kept;
@@ -441,7 +336,7 @@ local function MergeStats(dst, src)
     end
 end
 
-local TARGET_BUCKETS = { "damageDone", "damageTaken", "healingDone", "cleanses", "debuffsGiven", "interrupts" }
+local TARGET_BUCKETS = { "damageDone", "damageTaken", "healingDone", "cleanses", "debuffsGiven" }
 
 -- Re-keys every per-target table of an encounter by name, merging
 -- same-named entries (see TargetKey) - run when a fight is saved to
@@ -472,35 +367,19 @@ local function CompactTargets(enc)
     end
 end
 
+-- Current and Overall are saved to CombatLedgerDB.liveState on
+-- PLAYER_LOGOUT (which /reload also fires) and restored on the next
+-- PLAYER_ENTERING_WORLD - see Events.lua.
 local function SerializeState()
     return { current = current, overall = overall }
 end
 
--- `current`'s startTime is a GetTime() value from the PREVIOUS process -
--- valid across a same-process /reload (GetTime() keeps counting, since
--- /reload only rebuilds the Lua environment, not the game client
--- process), but not across a real logout/relogin (GetTime() resets to
--- ~0 on a fresh client launch). The original check here was
--- "startTime <= GetTime()", meant to reject a startTime that would
--- otherwise land in the future - but that's not actually a same-process
--- test: a fresh launch's GetTime() ALSO starts small, so an old
--- encounter that itself started early in ITS session (small startTime)
--- can trivially satisfy "<= GetTime()" again on a brand new process
--- once even a few seconds have ticked since login, and get wrongly
--- restored as still-live. That silently absorbed the real session's
--- first hit into the stale encounter (which the idle timeout then
--- finishes/discards before the real pull even starts) - reported as
--- "the first hit of a new session doesn't get recorded", easy to hit
--- while testing this exact behavior (attack once, relaunch to check,
--- repeat - each of those old sessions has a small startTime by
--- construction). startTimeReal (time(), wall-clock) doesn't have this
--- problem - it never resets across any boundary, reload or relaunch -
--- so "was this saved within the last few minutes" is a real same-
--- process test instead of a coincidental number comparison. Missing
--- startTimeReal (older saved data, before this field existed) is
--- treated as stale/reject, same as the original conservative default.
--- overall doesn't have this problem (activeDuration is just an
--- accumulated number, not a GetTime()-relative one).
+-- A saved live encounter is only restored when it was saved within
+-- RESTORE_STALE_SECONDS by wall clock (startTimeReal). Its startTime is a
+-- GetTime() value, which keeps counting across a /reload but restarts
+-- near 0 on a fresh client launch, so it can't tell a reload from a
+-- relaunch by itself. Saves without startTimeReal are treated as stale.
+-- Overall has no such issue: its duration is an accumulated number.
 local RESTORE_STALE_SECONDS = 300
 local function RestoreState(saved)
     dataVersion = dataVersion + 1
@@ -518,10 +397,9 @@ local function RestoreState(saved)
     end
 end
 
--- Overall's displayed duration should only advance while actually
--- fighting, not across idle gaps between pulls (otherwise standing
--- around between fights keeps diluting Overall DPS). accumulated
--- finished-fight time, plus the live in-progress fight if there is one.
+-- Overall's duration counts only time spent in encounters (finished
+-- ones plus the live one), so idle time between pulls doesn't dilute
+-- Overall rates.
 local function GetOverallDuration()
     local d = overall.activeDuration or 0
     if current then
@@ -530,17 +408,11 @@ local function GetOverallDuration()
     return d
 end
 
--- lastActivityTime (Events.lua's own lastEventTime, touched by every
--- relevant combat event) trims trailing idle time out of the reported
--- duration - PLAYER_REGEN_ENABLED can fire well after the last real hit
--- (standing around still "in combat" for other reasons, a slow-to-clear
--- flag, waiting out the grace window), which was inflating duration and
--- understating DPS/rate for every mode. GreedMeter (this addon's own
--- reference point) does exactly this same trim in its own
--- Parser:OnCombatEnd - matching it is why a side-by-side comparison
--- kept showing a shorter GreedMeter duration for the identical fight.
--- Only ever shrinks duration, never extends it, and only when the last
--- activity actually falls inside this encounter's own span.
+-- Ends the live encounter. The duration runs to lastActivityTime (the
+-- last relevant combat event, from Events.lua) rather than to now, so
+-- time spent flagged in combat after the last hit - including the end
+-- debounce - doesn't dilute rates. Only ever shortens, and only when
+-- that time falls inside the encounter.
 local function EndEncounter(lastActivityTime)
     dataVersion = dataVersion + 1
     if not current then return nil end
@@ -564,9 +436,7 @@ local function IsTrackedGuid(guid)
     return guid and CL.GuidCache and CL.GuidCache.IsTracked(guid)
 end
 
--- Which side of a caster/target pair is the enemy (not on our roster) -
--- shared by the pull-announcement classification check below and
--- RecordDamage's own mob tally/health population further down.
+-- The non-roster side of a caster/target pair (the enemy), or nil.
 local function EnemyGuidFor(casterGuid, targetGuid)
     if casterGuid and targetGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
         return AttributedGuid(targetGuid)
@@ -576,21 +446,10 @@ local function EnemyGuidFor(casterGuid, targetGuid)
     return nil
 end
 
--- This client's SuperWoW lets a raw GUID stand in for a unit token
--- directly (see GuidCache.lua/RecordDamage's own UnitHealthMax use) -
--- UnitClassification(guid)/UnitLevel(guid) resolve right here the same
--- way, as long as the enemy is actually in range, which it is by
--- definition (we just recorded a hit involving it).
---
--- Plain "elite" alone (TWThreat's own restriction, which this used to
--- just mirror) catches every elite trash pack too, not just real
--- bosses - most vanilla instance bosses aren't actually classified
--- "worldboss" (that classification is mostly reserved for open-world
--- named bosses like Onyxia), so a real boss is identified here as
--- EITHER worldboss, OR elite/rareelite with no real level shown
--- ("??", UnitLevel returning -1) - the common heuristic other addons
--- use, since regular elite trash almost always has a real numeric
--- level.
+-- Boss detection: "worldboss", or an elite/rare elite whose level shows
+-- as "??" (UnitLevel -1). Most instance bosses are the latter, and elite
+-- trash almost always has a real level. The GUID works as a unit token
+-- (SuperWoW); the enemy is in range since we just saw a hit involving it.
 local function IsBossTaggedEnemy(enemyGuid)
     if not enemyGuid or not UnitClassification then return false end
     local ok, classification = pcall(UnitClassification, enemyGuid)
@@ -616,11 +475,9 @@ local function IsBossTaggedEnemy(enemyGuid)
     return isBoss
 end
 
--- A mob's classification/level never changes, so each enemy is checked
--- once per encounter instead of on every hit until a boss shows up (a
--- long trash pull used to run two pcall'd unit lookups per event).
--- Unlike a timed scan, the first hit on each new enemy is still checked
--- immediately, so pull attribution stays exact.
+-- Classification never changes, so each enemy is checked once per
+-- encounter. The first hit on each new enemy is still checked
+-- immediately, which keeps pull attribution exact.
 local function IsBossTaggedEnemyCached(enemyGuid)
     if not enemyGuid then return false end
     local cached = bossTagCache[enemyGuid]
@@ -631,9 +488,7 @@ local function IsBossTaggedEnemyCached(enemyGuid)
     return cached
 end
 
--- Which melee sub-entry a dmg=0-or-not auto-attack swing belongs in -
--- shared by RecordDamageInto and RecordAvoidanceInto so main-hand/
--- off-hand/pet routing stays in exactly one place.
+-- The melee entry (main/off-hand, own/pet) an auto-attack belongs in.
 local function MeleeEntryFor(bucket, isPet, isOffhand)
     if isPet then
         return isOffhand and bucket.petOffhand or bucket.petMelee
@@ -703,12 +558,9 @@ local function EnsureTargetEntry(units, targets, guid)
     return t
 end
 
--- casterGuid/targetGuid may each independently be nil (unattributable
--- source or target) - record whichever side we actually have. Only ever
--- for roster members though: a bar list should show "us", not whatever
--- mob happens to be on the other end of the hit (a mob dealing damage
--- to you is not a "Damage Done" entry for the mob, and a mob you're
--- hitting is not a "Damage Taken" entry for the mob).
+-- Records one hit into a units table: Damage Done for a roster caster,
+-- Damage Taken for a roster target. Mobs never get a unit of their own.
+-- Either guid may be nil (environment damage has no caster).
 local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
     if casterGuid then
         local attributed = AttributedGuid(casterGuid)
@@ -718,9 +570,8 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
             ApplyMitigation(u.damageDone, mit)
             if spellId then
                 local entry = EnsureSpellEntry(u.damageDone.spells, spellId, spellName, school)
-                -- A DoT's AURA_CAST (see RecordCast) can land before this
-                -- entry exists - fold in whatever cast count was stashed
-                -- waiting for it, once, right when the entry is born.
+                -- Fold in casts counted before this spell's first damage
+                -- (see RecordCastInto).
                 if u.pendingCasts and u.pendingCasts[spellId] then
                     entry.casts = (entry.casts or 0) + u.pendingCasts[spellId]
                     u.pendingCasts[spellId] = nil
@@ -761,10 +612,7 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
                 RecordDamageHit(MeleeEntryFor(u.damageTaken, attributed ~= targetGuid, isOffhand), amount, isCrit, mit)
             end
 
-            -- Who this damage actually came from (reuses damageTaken's
-            -- own `targets` field, same bucket-shaped-entry trick as
-            -- damageDone.targets) - the breakdown window shows this as
-            -- "Attackers:" instead of "Targets:" for this mode.
+            -- damageTaken.targets = attackers.
             if casterGuid then
                 local s = EnsureTargetEntry(units, u.damageTaken.targets, casterGuid)
                 s.total = s.total + amount
@@ -790,11 +638,8 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
         StartEncounter()
     end
 
-    -- Pull attribution: whoever's action is the first damage event
-    -- against/from a boss-tagged enemy this encounter "pulled" it - set
-    -- once. Stays nil until a boss-tagged hit actually happens, so a
-    -- trash-only encounter never claims this and never prints - see
-    -- CL.GetSetting("announcePulls").
+    -- Pull attribution: the caster of the first hit involving a boss
+    -- "pulled" it. Set once; trash-only encounters never set it.
     if not current.pullBy and casterGuid and IsBossTaggedEnemyCached(EnemyGuidFor(casterGuid, targetGuid)) then
         local info = CL.GuidCache and CL.GuidCache.Resolve(casterGuid)
         current.pullBy = { name = (info and info.name) or casterGuid, label = spellName or "Auto Attack" }
@@ -816,23 +661,15 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
         RecordSeriesPoint(current, "taken", amount)
     end
 
-    -- Tally damage dealt to whatever's NOT a roster member - i.e. the
-    -- mob(s) actually being fought - purely so History.lua can label a
-    -- saved encounter by the toughest thing in the pull. Mobs otherwise
-    -- never get a units entry at all (see RecordDamageInto above).
+    -- Damage and max health per enemy, only so History.lua can label a
+    -- saved encounter after the toughest mob in it.
     if casterGuid and targetGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
         local targetAttributed = AttributedGuid(targetGuid)
         if not IsTrackedGuid(targetAttributed) then
             current.mobTally[targetAttributed] = (current.mobTally[targetAttributed] or 0) + amount
 
-            -- This client's SuperWoW lets a raw GUID stand in for a unit
-            -- token directly (see GuidCache.lua) - UnitHealthMax(guid)
-            -- resolves right here with no "target"/nameplate token
-            -- needed, as long as the mob is actually in range, which it
-            -- is by definition (we just recorded a hit on it). Max health
-            -- doesn't change as the mob takes damage, so sample it once
-            -- per mob per encounter (0 = unreadable, not retried) rather
-            -- than on every hit.
+            -- Max health doesn't change, so it's read once per mob per
+            -- encounter (0 = unreadable, not retried).
             if UnitHealthMax and current.mobHealth[targetAttributed] == nil then
                 local ok, maxHp = pcall(UnitHealthMax, targetAttributed)
                 current.mobHealth[targetAttributed] = (ok and tonumber(maxHp)) or 0
@@ -862,13 +699,8 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
     end
 end
 
--- "Casts" for a DoT (Corruption, Curse of Agony) is a genuinely
--- different number than its tick count - one cast produces several
--- ticks over the debuff's duration - so it needs its own signal instead
--- of reusing entry.hits (see Events.lua's HandleAuraCast). Only ever
--- attributed to the top-level unit entry (u.damageDone.spells), not
--- per-target sub-entries - "Casts" is shown on the unit-wide breakdown
--- panel, not the per-target one.
+-- Cast counts (from AURA_CAST) for spells whose hits are DoT ticks, where
+-- the hit count isn't the number of casts. Unit-wide entries only.
 local function RecordCastInto(units, casterGuid, spellId, spellName)
     if not casterGuid or not spellId then return end
     local attributed = AttributedGuid(casterGuid)
@@ -878,12 +710,10 @@ local function RecordCastInto(units, casterGuid, spellId, spellName)
     if entry then
         entry.casts = (entry.casts or 0) + 1
     else
-        -- No damage entry yet (the cast fires before the first tick
-        -- lands) - stash the count on the unit itself, NOT as a spell
-        -- entry, so a spell that never actually deals damage (an
-        -- ordinary self-buff cast, also seen on AURA_CAST) never shows
-        -- up as a stray zero-damage row in Damage Done. RecordDamageInto
-        -- folds this in once a real entry is created.
+        -- No damage entry yet (the cast lands before the first tick):
+        -- stash the count on the unit rather than creating an entry, so
+        -- non-damage casts (buffs) never become zero-damage rows.
+        -- RecordDamageInto folds it in when the entry is created.
         u.pendingCasts = u.pendingCasts or {}
         u.pendingCasts[spellId] = (u.pendingCasts[spellId] or 0) + 1
     end
@@ -891,17 +721,9 @@ end
 
 local function RecordCast(casterGuid, spellId, spellName)
     dataVersion = dataVersion + 1
-    -- Deliberately does NOT lazy-start like RecordDamage/RecordHealing/
-    -- etc. do - AURA_CAST fires for every buff/heal cast on a tracked
-    -- unit, not just combat spells (confirmed via debug log: a priest's
-    -- routine post-fight Renew, cast well outside ShouldLazyStart's
-    -- 3-second phantom-guard window, was enough to spin up a blank
-    -- encounter and wipe the just-finished Current Fight). A cast alone
-    -- is never real evidence combat resumed, so if there's no already-
-    -- active encounter to tally into, just drop it - the very first
-    -- cast of a fight-opening DoT can undercount by one (falls back to
-    -- matching the tick count in the breakdown window), which is a far
-    -- smaller cost than phantom-restarting on unrelated healing.
+    -- Never starts an encounter: AURA_CAST fires for every buff and heal
+    -- too, so a cast alone isn't evidence of a fight. The cost is that a
+    -- fight-opening DoT cast can go uncounted.
     if not current then return end
     RecordCastInto(current.units, casterGuid, spellId, spellName)
     RecordCastInto(overall.units, casterGuid, spellId, spellName)
@@ -940,12 +762,9 @@ local function RecordAvoidanceInto(units, casterGuid, targetGuid, key, isOffhand
     end
 end
 
--- A melee swing that connected for 0 damage because it was avoided -
--- see AUTO_ATTACK's victimState in Events.lua's HandleAutoAttack. Not
--- routed through RecordDamage since amount is always 0 here; still
--- writes into both current and overall like every other Record* call.
--- `mit` carries a fully blocked/absorbed swing's amount; fullAbsorb
--- counts a "normal" 0-damage swing a shield soaked as "absorb".
+-- An auto-attack swing that did no damage: counted by outcome on the
+-- melee entry (victimState, or "absorb" for a swing a shield soaked
+-- entirely). `mit` carries a fully blocked/absorbed swing's amount.
 local function RecordAvoidance(casterGuid, targetGuid, victimState, isOffhand, mit, fullAbsorb)
     dataVersion = dataVersion + 1
     if not current then
@@ -982,8 +801,8 @@ local function RecordHealHit(entry, amount, effective, overheal, isCrit, unverif
     if not entry.max or amount > entry.max then entry.max = amount end
 end
 
--- SPELL_MISS_* missInfo -> avoided key (vmangos SpellMissInfo; same
--- mapping Skada uses). 7 and 8 are both immune variants.
+-- SPELL_MISS_* missInfo -> outcome key (vmangos SpellMissInfo; 7 and 8
+-- are both immune variants).
 local SPELL_MISS_KEY = {
     [1] = "miss", [2] = "resist", [3] = "dodge", [4] = "parry", [5] = "block",
     [6] = "evade", [7] = "immune", [8] = "immune", [9] = "deflect",
@@ -1071,11 +890,9 @@ end
 -- Events.lua's target-health estimate (verified = health was readable).
 local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount, effective, overheal, isCrit, verified)
     dataVersion = dataVersion + 1
-    -- Lazy-starts only while the player or group is actually in combat
-    -- (a healer standing back while the tank pulls). Out-of-combat
-    -- top-offs and trailing HoT ticks after a pull are not evidence of a
-    -- fight - a post-fight Renew used to phantom-start a blank encounter
-    -- and wipe the just-finished Current Fight.
+    -- Starts an encounter only while the player or group is in combat
+    -- (a healer healing before landing a hit). Out-of-combat top-offs and
+    -- trailing HoT ticks never start one.
     if not current then
         if not IsGroupFighting() then return end
         StartEncounter()
@@ -1090,12 +907,8 @@ local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount,
     end
 end
 
--- Shared by Cleanses/Buffs Given/Debuffs Given - all three are "how many
--- times did X happen" counts (amount always 1, no "how much" the way
--- damage/healing have), same bucket shape (spells/targets), so this one
--- function backs all three instead of three near-identical copies.
--- `bucketKey` picks which field on the unit record to write into
--- ("cleanses" / "buffsGiven" / "debuffsGiven").
+-- Records one occurrence into a count-only bucket ("cleanses" or
+-- "debuffsGiven"): total and per-spell/per-target counts.
 local function RecordCountEventInto(units, bucketKey, casterGuid, targetGuid, spellId, spellName)
     if not casterGuid then return end
     local attributed = AttributedGuid(casterGuid)
@@ -1120,9 +933,7 @@ end
 
 local function RecordCleanse(casterGuid, targetGuid, spellId, spellName)
     dataVersion = dataVersion + 1
-    -- Same combat-gated lazy-start as RecordHealing: dispels also
-    -- happen out of combat and are only evidence of a fight when the
-    -- player or group is actually fighting.
+    -- Same combat-gated start as RecordHealing.
     if not current then
         if not IsGroupFighting() then return end
         StartEncounter()
@@ -1141,22 +952,10 @@ local function RecordDebuffGiven(casterGuid, targetGuid, spellId, spellName)
     RecordCountEventInto(overall.units, "debuffsGiven", casterGuid, targetGuid, spellId, spellName)
 end
 
-local function RecordInterrupt(casterGuid, targetGuid, spellId, spellName)
-    dataVersion = dataVersion + 1
-    if not current then
-        if not ShouldLazyStart() then return end
-        StartEncounter()
-    end
-    RecordCountEventInto(current.units, "interrupts", casterGuid, targetGuid, spellId, spellName)
-    RecordCountEventInto(overall.units, "interrupts", casterGuid, targetGuid, spellId, spellName)
-end
-
 local function RecordDeath(guid)
     dataVersion = dataVersion + 1
     local attributed = guid
-    -- Pet deaths are never counted, merged or not - a Warlock's
-    -- Voidwalker dying is not the same as the Warlock dying, and Deaths
-    -- is a real UI category people will look at directly.
+    -- Pet deaths aren't counted (a pet dying isn't its owner dying).
     if CL.GuidCache and CL.GuidCache.GetOwner(guid) then return nil end
     if not IsTrackedGuid(attributed) then return nil end
     local u = EnsureUnit(overall.units, attributed)
@@ -1170,19 +969,13 @@ local function RecordDeath(guid)
 end
 
 --------------------------------------------------------------------------
--- Test mode - fabricated encounter for previewing appearance settings
--- (bar texture/font/size/color) without needing to actually fight
--- something, same idea as Details' "Create test bars" button. Built
--- from the same NewEncounter/EnsureUnit/RecordHit helpers real combat
--- events use, so it's genuinely the same shape - the breakdown window's
--- click-through works on it same as a real encounter.
+-- Test mode: a fabricated encounter for previewing appearance settings.
+-- Built with the same helpers as real data, so breakdowns work on it.
 --------------------------------------------------------------------------
 
 local testEncounter = nil -- cached once generated, not regenerated every refresh
 
--- amount/hits/crit% all scale off `power` (1.0 = top of the pack) so
--- whichever unit is called with power=1 always sorts first in every
--- mode, regardless of what real numbers would make sense per-class.
+-- Amounts scale with `power` (1.0 = top of every mode).
 local function FakeHits(bucket, entry, count, avgAmount, critPct)
     local i
     for i = 1, count do
@@ -1208,8 +1001,7 @@ local function FakeDamageDone(u, power)
         FakeHits(bucket, entry, math.floor(10 * power) + 2, 350 * power, 22)
     end
 
-    -- Two fake targets so the breakdown window's Targets: list (and the
-    -- "All Enemies" reset row) has something to show too.
+    -- Two targets, so the Targets list and "All Enemies" row show.
     local bossTotal = math.floor(bucket.total * 0.7)
     bucket.targets["TESTBOSS"] = { name = "Training Dummy", total = bossTotal, hits = math.floor((bucket.melee.hits or 0) * 0.7), spells = {}, melee = NewMeleeEntry(), offhand = NewMeleeEntry(), petMelee = NewMeleeEntry(), petOffhand = NewMeleeEntry() }
     bucket.targets["TESTADD1"] = { name = "Training Dummy's Friend", total = bucket.total - bossTotal, hits = math.floor((bucket.melee.hits or 0) * 0.3), spells = {}, melee = NewMeleeEntry(), offhand = NewMeleeEntry(), petMelee = NewMeleeEntry(), petOffhand = NewMeleeEntry() }
@@ -1228,8 +1020,7 @@ local function FakeHealingDone(u, power)
         AddHeal(bucket, amount, amount - overheal, overheal, false)
     end
 
-    -- Two fake recipients so the breakdown window's "Healed:" list has
-    -- something to show too.
+    -- Two recipients for the "Healed" list.
     local tankTotal = math.floor(bucket.total * 0.6)
     bucket.targets["TESTTANK"] = { name = "Kaladin", total = tankTotal, hits = math.floor(entry.hits * 0.6), overheal = 0, spells = {} }
     bucket.targets["TESTSELF"] = { name = u.name, total = bucket.total - tankTotal, hits = entry.hits - math.floor(entry.hits * 0.6), overheal = 0, spells = {} }
@@ -1239,14 +1030,11 @@ local function FakeDamageTaken(u, power)
     local bucket = u.damageTaken
     FakeHits(bucket, bucket.melee, math.floor(8 * power) + 3, 150 * power, 10)
 
-    -- One fake attacker so the breakdown window's "Attackers:" list has
-    -- something to show too.
+    -- One attacker for the "Attackers" list.
     bucket.targets["TESTBOSS"] = { name = "Training Dummy", total = bucket.total, hits = bucket.melee.hits, spells = {}, melee = NewMeleeEntry(), offhand = NewMeleeEntry(), petMelee = NewMeleeEntry(), petOffhand = NewMeleeEntry() }
 end
 
--- Shared by FakeCleanses/FakeDebuffsGiven - fills one count-only bucket
--- with `count` hits of a single fake ability and one fake recipient,
--- same shape RecordCountEventInto produces for real.
+-- Fills a count-only bucket with one ability and one recipient.
 local function FakeCountEvent(bucket, spellId, spellName, count, recipientGuid, recipientName)
     local entry = EnsureSpellEntry(bucket.spells, spellId, spellName, nil)
     local i
@@ -1267,14 +1055,8 @@ local function FakeDebuffsGiven(u, power)
     FakeCountEvent(u.debuffsGiven, 172, "Corruption", math.floor(4 * power), "TESTBOSS", "Training Dummy")
 end
 
-local function FakeInterrupts(u, power)
-    FakeCountEvent(u.interrupts, 1766, "Kick", math.floor(2 * power), "TESTBOSS", "Training Dummy")
-end
-
--- name, classToken, power (1.0 = always tops every mode - "Kobeni the
--- Warlock" is the player's own character, shown first by design). The
--- rest of the roster is Stormlight Archive characters, cast against
--- the classes they fit best.
+-- name, classToken, power (1.0 = tops every mode; the first entry plays
+-- the player).
 local TEST_ROSTER = {
     { name = "Kobeni", classToken = "WARLOCK", power = 1.0, isPlayer = true },
     { name = "Kaladin", classToken = "WARRIOR", power = 0.92 },
@@ -1288,10 +1070,8 @@ local TEST_ROSTER = {
     { name = "Navani", classToken = "SHAMAN", power = 0.5 },
 }
 
--- Builds the unit record directly rather than going through EnsureUnit -
--- that calls into GuidCache.Resolve, which expects a real combat GUID
--- and (on this client) hard-errors on an arbitrary string like
--- "TESTUNIT1" instead of just returning nil.
+-- Built directly rather than via EnsureUnit, whose GuidCache.Resolve
+-- expects real GUIDs.
 local function NewTestUnit(r)
     return {
         name = r.name,
@@ -1303,7 +1083,6 @@ local function NewTestUnit(r)
         damageTaken = NewBucket(),
         cleanses = { total = 0, spells = {}, targets = {} },
         debuffsGiven = { total = 0, spells = {}, targets = {} },
-        interrupts = { total = 0, spells = {}, targets = {} },
         deaths = 0,
     }
 end
@@ -1359,7 +1138,6 @@ CL.Aggregator = {
     RecordCast = RecordCast,
     RecordCleanse = RecordCleanse,
     RecordDebuffGiven = RecordDebuffGiven,
-    RecordInterrupt = RecordInterrupt,
     RecordDeath = RecordDeath,
     GetTestEncounter = GetTestEncounter,
     ClearTestEncounter = ClearTestEncounter,

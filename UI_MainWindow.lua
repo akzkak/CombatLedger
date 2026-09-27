@@ -34,16 +34,10 @@ local MAX_WINDOW_WIDTH, MAX_WINDOW_HEIGHT = 500, 600
 local REFRESH_INTERVAL = 0.2
 local IDLE_REFRESH_SECONDS = 2 -- see the refresh driver at the bottom of this file
 
--- "Buffs Given" was built (same mechanism as Debuffs) but is hidden -
--- prebuffing happens out of combat, before the encounter it's for even
--- starts, so it doesn't fit this addon's per-encounter model. See
--- Aggregator.lua.
--- Threat is last, matching GreedMeter's own ordering - and unlike every
--- other mode, it isn't built from anything CombatLedger aggregates
--- itself. It's a live snapshot from this server's own threat API (see
--- Threat.lua) with no Current/Overall/History distinction, so it gets
--- its own code path through RefreshInstance/ShowBarTooltip below rather
--- than flowing through GetActiveEncounter like everything else.
+-- Threat differs from every other mode: it's a live snapshot (Threat.lua)
+-- rather than recorded data, with no Current/Overall/History, so it has
+-- its own path through RefreshInstance/ShowBarTooltip instead of
+-- GetActiveEncounter.
 local MODE_ORDER = { "damage", "healing", "taken", "cleanses", "debuffs", "deaths", "threat" }
 local MODE_TITLES = { damage = "Damage Done", healing = "Healing Done", taken = "Damage Taken", cleanses = "Dispels", debuffs = "Debuffs Given", deaths = "Deaths", threat = "Threat" }
 
@@ -58,11 +52,8 @@ local function CountLabel(mode, n)
     return n .. " " .. word .. ((n == 1) and "" or "s")
 end
 
--- Full words now that these show directly on the header buttons instead
--- of a separate title (see the header-row comment near CreateWindowFrame) -
--- "history" is only ever a fallback default; the real text once a
--- specific saved encounter is selected is that encounter's own label
--- (see ShowHistoryEncounterIn).
+-- Segment button labels. A selected History fight shows its own label
+-- instead (ShowHistoryEncounterIn); "history" is only the fallback.
 local SEGMENT_LABELS = { current = "Current", overall = "Overall", history = "History" }
 
 -- Every open window, keyed by id. "main" always exists; extra windows
@@ -72,11 +63,8 @@ local instances = {}
 local instanceOrder = {}
 CL.UIWindows = instances
 
--- Set right before StaticPopup_Show("COMBATLEDGER_ANNOUNCE") and read
--- from its OnAccept - a plain captured variable rather than relying on
--- StaticPopup_Show's own data-passing arguments, whose exact behavior
--- on this client build isn't worth depending on for something this
--- simple.
+-- The window an announce confirmation is for; set before showing the
+-- COMBATLEDGER_ANNOUNCE popup and read in its OnAccept.
 local pendingAnnounceInst = nil
 
 -- Dropdown menu itself (CL.ShowDropdown/CL.CloseDropdown) moved to
@@ -152,23 +140,13 @@ local function BuildSortedList(units, mode, out)
     return list
 end
 
--- Threat mode's own list builder - CL.Threat.GetSnapshot() is already a
--- flat [guid]={name,threat,perc,melee,tank} table refreshed live by the
--- server (see Threat.lua), not something built up from recorded events
--- the way every other mode's list is, so this doesn't go through
--- MetricTotal/units at all. classToken comes from GuidCache since threat
--- entries are always real roster members (a real guid, not a synthetic
--- one) whenever the roster scan managed to resolve them. `filterSet`
--- ([name]=true) narrows the list to just those names - see
--- ShowThreatFilterDropdown; nil/empty shows everyone.
--- Second return value is the "Pull Aggro At" reference row (mirrors
--- TWThreat's own calcAGROPerc) - not a real player, so it's kept
--- separate from the sorted list rather than mixed in, letting
--- RefreshInstance compute bar-width scaling from real entries only
--- before pinning this to the top. Vanilla's threat-override rule: a
--- non-tank needs more than 130% of the tank's threat to pull aggro at
--- range, 110% in melee - the value shown is how much MORE threat you
--- specifically still need, not the raw threshold.
+-- Threat mode's list, built from CL.Threat.GetSnapshot() rather than
+-- recorded units. `filterSet` ([name] = true) limits it to those names;
+-- nil/empty shows everyone.
+-- The second return is the "Pull Aggro At" reference row, kept out of
+-- the sorted list so bar scaling uses real entries only. A non-tank pulls
+-- aggro above 110% of the tank's threat in melee, 130% at range; the row
+-- shows how much more threat the player can generate before that.
 local function BuildThreatList(filterSet)
     local list = {}
     -- Test Mode substitutes a fake snapshot (see Threat.lua's
@@ -239,9 +217,8 @@ local function BuildThreatList(filterSet)
     return list, marker
 end
 
--- Same list either mode uses: melee + petMelee + each spell, sorted
--- descending. Reused by the hover tooltip below (GreedMeter shows this
--- exact "By spell" breakdown on mouseover rather than requiring a click).
+-- Per-ability totals for the hover tooltip's "By spell" section: melee
+-- rows plus each spell, sorted descending.
 local function BuildSpellSummary(u, mode)
     local list = {}
     if not u then return list end
@@ -513,16 +490,9 @@ local function CreateBar(inst, parent, index)
     bg:SetVertexColor(0.15, 0.15, 0.15, 0.85)
     bar.bg = bg
 
-    -- Border overlay (Options: "Show bar border" / "Highlight my bar") -
-    -- a SEPARATE child frame, not a backdrop set directly on bar itself.
-    -- A plain SetBackdrop border on a StatusBar renders on the frame's
-    -- own BACKGROUND layer, same as bar.bg above and the status-bar fill
-    -- texture itself - whichever of those draws last/on top hides most
-    -- of the border, leaving only a sliver visible wherever nothing
-    -- happens to cover it (confirmed via screenshot: only the small
-    -- unfilled strip near valueText showed any color). A child frame
-    -- with a higher FrameLevel composites strictly above everything on
-    -- bar, so the border is always fully visible regardless of fill %.
+    -- Border overlay (Options: "Show bar border" / "Highlight my bar") on
+    -- a child frame one level up: a backdrop on the StatusBar itself
+    -- would draw underneath its own fill texture.
     local borderFrame = CreateFrame("Frame", nil, bar)
     borderFrame:SetAllPoints(bar)
     borderFrame:SetFrameLevel(bar:GetFrameLevel() + 10)
@@ -542,14 +512,8 @@ local function CreateBar(inst, parent, index)
     classIcon:SetWidth(height - 4)
     classIcon:SetHeight(height - 4)
     classIcon:SetPoint("LEFT", bar, "LEFT", 3, 0)
-    -- Not the stock Interface\TargetingFrame\UI-Classes-Circle atlas -
-    -- confirmed (via /cl debug) that texture shows nothing on this
-    -- client despite loading and rendering without error, same "non-
-    -- square textures silently fail" class of issue as CL.GetBarTexture
-    -- earlier, except this stock one apparently fails regardless of its
-    -- real dimensions. Using pfUI's own bundled classicons.tga instead
-    -- (256x256, confirmed square, MIT-licensed - see README) - same
-    -- CLASS_ICON_TCOORDS layout, just a different, working file.
+    -- Bundled img/classicons.tga (pfUI's, see README): the stock
+    -- UI-Classes-Circle atlas doesn't render on this client.
     classIcon:SetTexture("Interface\\AddOns\\CombatLedger\\img\\classicons")
     classIcon:Hide()
     bar.classIcon = classIcon
@@ -561,12 +525,8 @@ local function CreateBar(inst, parent, index)
     CL.ApplyFont(valueText, CL.GetFontSize())
     bar.valueText = valueText
 
-    -- LEFT anchor is re-set every refresh (see RefreshInstance) based on
-    -- whether the class icon is actually showing for this entry - starts
-    -- at the same bar:LEFT+4 as always here. RIGHT is bounded to
-    -- valueText (was unbounded) - an unbounded name could run straight
-    -- into it once both were long enough. Created after valueText so it
-    -- can anchor off it.
+    -- LEFT is re-anchored each refresh depending on the class icon;
+    -- RIGHT stops at valueText so long names don't run into the value.
     local nameText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
     nameText:SetPoint("RIGHT", valueText, "LEFT", -4, 0)
@@ -599,12 +559,9 @@ local function FooterGap()
     return FOOTER_GAP
 end
 
--- Threat is a fixed, non-scrollable snapshot like TWThreat: calculate how
--- many complete rows fit in this particular window and, when the player's
--- real rank falls below them, move that entry into the last visible real-
--- player slot. Called only by Threat mode's RefreshInstance branch; every
--- recorded meter mode keeps its normal sorted, scrollable list. threatRank
--- preserves the player's real rank label after this display-only move.
+-- Threat mode doesn't scroll: returns how many rows fit and, when the
+-- player ranks below them, moves the player into the last visible slot
+-- (display only - threatRank keeps the real rank for the label).
 local function PinThreatPlayerToViewport(list, window, hasMarker)
     if not list or not window then return 1 end
 
@@ -635,13 +592,9 @@ local function PinThreatPlayerToViewport(list, window, hasMarker)
     return visibleRows
 end
 
--- How far the bar list can actually scroll. Deliberately NOT
--- barScroll:GetVerticalScrollRange() - that depends on the ScrollFrame's
--- own anchor-derived height, and this client doesn't reliably keep that
--- current (same class of geometry staleness as the breakdown window's
--- target-list layout, which works around it the same way: compute from
--- window:GetHeight(), a value that's directly SetHeight'd rather than
--- anchor-derived, instead of trusting a read-back that may be stale).
+-- How far the bar list can scroll, computed from window:GetHeight()
+-- (set directly) because anchor-derived heights like
+-- GetVerticalScrollRange() can read stale on this client.
 local function GetMaxBarScroll(window)
     local viewportHeight = window:GetHeight() - HEADER_HEIGHT - FooterGap()
     local maxScroll = window.barParent:GetHeight() - viewportHeight
@@ -656,12 +609,7 @@ local function CreateHeaderButton(parent, width, initialText)
     local btn = CreateFrame("Button", nil, parent)
     btn:SetWidth(width)
     btn:SetHeight(16)
-    -- Flat WHITE8X8 shape, matching the window's own backdrop (see
-    -- CL.WINDOW_BACKDROP) - used to be Blizzard's rounded Tooltip
-    -- border, which stayed even after ApplyButtonSkin started recoloring
-    -- the border to the new near-black flat color, since ApplyButtonSkin
-    -- only ever recolors whatever backdrop shape was already set here -
-    -- it never looked right mixed with the flat window frame around it.
+    -- Same flat backdrop as the window; ApplyButtonSkin only recolors it.
     btn:SetBackdrop({
         bgFile = "Interface\\BUTTONS\\WHITE8X8", tile = false, tileSize = 0,
         edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 1,
@@ -683,14 +631,9 @@ local function CreateHeaderButton(parent, width, initialText)
         sheen:SetVertexColor(1, 1, 1, 0.06)
     end
 
-    -- Click feedback (darkens briefly on press) - a plain backdrop box
-    -- otherwise gives zero visual response to a click, part of why it
-    -- reads as "off" without pfUI's own button skin doing this for us.
-    -- OnMouseUp gives the snappy revert when it fires, but it's NOT
-    -- reliable on this client once the click opens a dropdown/popup/new
-    -- window mid-interaction (confirmed - R/O/! don't even open anything
-    -- and still stuck) - btn.pressedAt is a safety net SetButtonTooltip's
-    -- OnUpdate polls to force the revert even if OnMouseUp never comes.
+    -- Press feedback: darken on mouse-down. OnMouseUp isn't delivered
+    -- reliably when the click opens a menu or window, so btn.pressedAt
+    -- also lets SetButtonTooltip's OnUpdate revert it after a timeout.
     btn:SetScript("OnMouseDown", function()
         btn.pressedAt = GetTime()
         btn:SetBackdropColor(0.05, 0.05, 0.06, 0.9)
@@ -710,30 +653,13 @@ local function CreateHeaderButton(parent, width, initialText)
     return btn
 end
 
--- Sets a CreateHeaderButton's label text and resizes the button to fit
--- it (label is SetAllPoints to the button, so resizing the button
--- resizes it) - used by modeBtn/segBtn now that they show full words
--- ("Damage Done", "Overall", a saved encounter's name) instead of a
--- fixed-width letter code.
---
--- Width comes from ComputeHeaderButtonWidths(parent's CURRENT width),
--- not from the text itself - Overall/Current/a long encounter name all
--- get the SAME width at a given window size, which is what stops the
--- button jumping around on every label change. That width isn't a fixed
--- constant either, though - it shrinks along with the window (see the
--- resize grip's OnUpdate, which reflows both buttons live on every
--- drag tick) so the window can still be dragged down small instead of
--- being floored at whatever width the full-word buttons prefer.
---
--- Text that doesn't fit the resulting width gets truncated with "..."
--- rather than just capping the button's own width and leaving the
--- label to render past it - a CENTER-justified FontString isn't
--- clipped by its own frame in vanilla, so an oversized string bled
--- visually into whatever button sat next to it instead of just getting
--- cut off at its own edge. btn.fullText/btn.isSegBtn remember the
--- untruncated text and role so a later reflow (font-size change, window
--- resize) can re-run this from the real original text instead of
--- re-truncating an already-truncated one.
+-- Sets the mode/segment button's label. The button's width comes from
+-- the window's current width (ComputeHeaderButtonWidths), not the text,
+-- so it doesn't jump around as labels change and shrinks with the
+-- window. Text that doesn't fit is truncated with "..." (a FontString
+-- isn't clipped by its frame and would bleed into the next button).
+-- btn.fullText/btn.isSegBtn keep the original text so a reflow (resize,
+-- font change) re-truncates from it.
 local SEG_BTN_PREFERRED, MODE_BTN_PREFERRED = 90, 100
 local HEADER_BTN_MIN_WIDTH = 20
 -- Space the left button group (margin + R/!) actually occupies, plus
@@ -814,10 +740,7 @@ local function RestyleAll()
             CL.ApplyFont(window.announceBtn.label)
             CL.ApplyFont(window.segBtn.label)
             CL.ApplyFont(window.modeBtn.label)
-            -- A font change can change these labels' rendered width too
-            -- (they show full words now, not a fixed letter code) - keep
-            -- them properly fit, not just re-fit at the next mode/segment
-            -- switch.
+            -- A font change changes label widths; re-fit them now.
             ReflowHeaderButton(window.segBtn)
             ReflowHeaderButton(window.modeBtn)
             local newBarHeight = CL.GetBarHeight(BAR_HEIGHT)
@@ -829,10 +752,7 @@ local function RestyleAll()
                 bar.bg:SetTexture(CL.GetBarTexture())
                 CL.ApplyFont(bar.nameText, CL.GetFontSize())
                 CL.ApplyFont(bar.valueText, CL.GetFontSize())
-                -- Class icon was sized once at bar creation from
-                -- whatever the bar height was then - never followed a
-                -- later "Bar size" change, so it stayed a fixed size
-                -- while the bar around it grew/shrank.
+                -- The class icon follows the bar height.
                 bar.classIcon:SetWidth(newBarHeight - 4)
                 bar.classIcon:SetHeight(newBarHeight - 4)
             end
@@ -846,36 +766,17 @@ local function RestyleAll()
 end
 CL.OnAppearanceChanged(RestyleAll)
 
--- restR/G/B (optional) is the button's normal border color - if given,
--- hovering brightens the border to white and leaving restores it. This
--- OWNS hover unconditionally now, including while matching pfUI - see
--- CL.ApplyButtonSkin, which passes disableHighlight=true to pfUI's own
--- SkinButton specifically so IT never installs a second, independent
--- OnEnter/OnLeave hover hook on these buttons that would otherwise
--- fight over the same border. That pfUI-owned hook was the real source
--- of the click/hover-stuck-color bug surviving past the first fix below
--- - it's built on the same raw OnEnter/OnLeave events already proven
--- unreliable here, and it was still fully enabled/wired up whenever
--- Match pfUI was on (the default), regardless of anything this function
--- did on its own side.
+-- Tooltip plus hover/press visuals for a header button. restR/G/B
+-- (optional) is the resting border color; hover brightens it to white.
+-- alwaysRestR/G/B (optional) forces a fixed resting color regardless of
+-- "Match pfUI"/"Class colored menus".
 --
--- alwaysRestR/G/B (optional) - when given, hover-leave restores to
--- exactly this color unconditionally, ignoring both "Match pfUI" and
--- "Class colored menus". For a fixed-color button (nothing currently
--- uses this, but Reset used to) that shouldn't follow either setting
--- the way every other button's border does.
---
--- Driven entirely off an OnUpdate poll of MouseIsOver rather than
--- OnEnter/OnLeave (and CreateHeaderButton's press-color off a polled
--- btn.pressedAt timeout rather than trusting OnMouseUp) - confirmed on
--- this client that a click opening a dropdown/popup/new window can
--- swallow the matching Up/Leave event, leaving the button stuck
--- pressed-dark or hover-white. Polling every frame is immune to that
--- since it doesn't depend on any event actually being delivered - and
--- unlike the old timeout-only revert, the fill color below is now
--- CONTINUOUSLY re-asserted every frame whenever not pressed (not just
--- once, 0.15s after a click), so nothing can leave one button showing a
--- different tone than its never-yet-clicked neighbors and have it stick.
+-- Driven by polling MouseIsOver in OnUpdate rather than OnEnter/OnLeave:
+-- a click that opens a menu or window can swallow the Leave/Up events
+-- on this client, which would leave the button stuck highlighted or
+-- pressed. The resting fill is re-asserted every frame for the same
+-- reason. This is the only hover handler - ApplyButtonSkin tells pfUI
+-- not to install its own.
 local function SetButtonTooltip(btn, title, subtitle, restR, restG, restB, alwaysRestR, alwaysRestG, alwaysRestB)
     local function NormalBorderColor()
         if alwaysRestR then return alwaysRestR, alwaysRestG, alwaysRestB end
@@ -924,9 +825,8 @@ local function SetButtonTooltip(btn, title, subtitle, restR, restG, restB, alway
     end)
 end
 
--- Posts this window's current mode/segment's top N (Options: Announce
--- Count) to the configured chat channel - one line per rank plus a
--- header, same shape GreedMeter's own announce button produces.
+-- Posts this window's top N (Options: Announce top) for its current
+-- mode/segment to the configured channel: a header, then one line per rank.
 local function AnnounceTop(inst)
     local window = inst.frame
     local isThreat = (window.mode == "threat")
@@ -989,16 +889,9 @@ local function CreateWindowFrame(inst)
     local themeR, themeG, themeB, themeHex = CL.GetThemeColor()
     f:SetBackdropColor(0, 0, 0, CL.GetBackdropAlpha(0.8))
     f:SetBackdropBorderColor(themeR, themeG, themeB, 1)
-    -- MEDIUM - HIGH still rendered above Blizzard's own Character/Bags/
-    -- Quest-dialog panels on this client (confirmed via screenshot,
-    -- covering CharacterFrame the same way FULLSCREEN_DIALOG did) -
-    -- MEDIUM is what History/Breakdown/EncounterReport already used
-    -- with no such complaint, so this matches those instead. The
-    -- dropdown submenu (Core.lua's ShowDropdown) doesn't need a fixed
-    -- TOOLTIP-always reservation either way - it computes its own
-    -- strata as one tier above whatever anchor opened it, so it still
-    -- reliably renders on top of this window regardless of which tier
-    -- this window itself ends up at.
+    -- MEDIUM, like the other CombatLedger windows: higher strata draw
+    -- over Blizzard's character/bag/quest panels. Dropdowns place
+    -- themselves one tier above their anchor.
     f:SetFrameStrata("MEDIUM")
     f:SetClampedToScreen(true) -- can't be dragged/pushed off-screen, unlike before
     f:SetMovable(true)
@@ -1025,17 +918,8 @@ local function CreateWindowFrame(inst)
     -- means "show everyone".
     f.threatFilter = (savedWinState and savedWinState.threatFilter) or {}
 
-    -- Deliberately NOT registered in UISpecialFrames - this is a live
-    -- meter meant to stay up throughout a session, not a dialog that
-    -- should vanish on a stray Escape (easy to hit by accident while
-    -- canceling a cast, closing another window, etc). Only /cl hide,
-    -- /cl toggle, and (for extra windows) the close button hide it.
-    --
-    -- No separate title FontString anymore - modeBtn/segBtn below show
-    -- the full mode name and segment directly (used to be short letter
-    -- codes with a centered title stating the mode again), which reads
-    -- just as clearly without a second element competing with the
-    -- buttons for space at a narrow window width.
+    -- Not in UISpecialFrames: a meter shouldn't close on a stray Escape.
+    -- The mode and segment buttons double as the title.
 
     -- Header row: Reset/Announce (left, compact single-letter - full
     -- names live in each button's own hover tooltip) ... Mode |
@@ -1050,10 +934,7 @@ local function CreateWindowFrame(inst)
     CL.ApplyButtonSkin(resetBtn, themeR, themeG, themeB)
     f.resetBtn = resetBtn
 
-    -- No header Options button anymore - redundant with the minimap
-    -- icon's right-click (see UI_Options.lua's CreateMinimapButton),
-    -- which already opens the exact same window; /cl options still
-    -- works too if the minimap icon itself is hidden.
+    -- Options open from the minimap icon's right-click or /cl options.
     local announceBtn = CreateHeaderButton(f, 18, "!")
     announceBtn:SetPoint("LEFT", resetBtn, "RIGHT", 4, 0)
     announceBtn:SetScript("OnClick", function()
@@ -1068,12 +949,8 @@ local function CreateWindowFrame(inst)
     CL.ApplyButtonSkin(announceBtn, themeR, themeG, themeB)
     f.announceBtn = announceBtn
 
-    -- No per-window close button anymore - extra windows are created and
-    -- closed exclusively from Options' Windows list now (CL.UI.
-    -- CreateExtraWindow/CloseExtraWindow, wired up in UI_Options.lua),
-    -- so every window's header is now IDENTICAL (main and extra both
-    -- anchor segBtn straight off the window's own TOPRIGHT) instead of
-    -- extra windows needing their own close-button-aware anchor math.
+    -- Extra windows are created and closed from Options' Windows list,
+    -- so every window has the same header with no close button.
     local segBtn = CreateHeaderButton(f, 20, "")
     SetHeaderButtonText(segBtn, (f.mode == "threat") and "Filter" or SEGMENT_LABELS[f.segment], true)
     segBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -6)
@@ -1094,10 +971,8 @@ local function CreateWindowFrame(inst)
     end
 
     segBtn:SetScript("OnClick", function()
-        -- Explicit, unconditional reset rather than relying on OnMouseUp
-        -- (see CreateHeaderButton) to restore the press-darken color -
-        -- opening a dropdown/menu from this handler was leaving it stuck
-        -- in the darkened "pressed" state instead of releasing normally.
+        -- Clear the pressed look here: opening a menu from this click
+        -- can swallow the OnMouseUp that would normally clear it.
         segBtn:SetBackdropColor(0.12, 0.12, 0.14, 0.9)
         if f.mode == "threat" then
             ShowThreatFilterDropdown(inst)
@@ -1169,13 +1044,9 @@ local function CreateWindowFrame(inst)
     barScroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, FooterGap())
     f.barScroll = barScroll
 
-    -- SetScrollChild manages the child's own position internally - it
-    -- must NOT be anchored with SetPoint beforehand (that left it
-    -- effectively unpositioned/invisible, taking every bar with it).
-    -- Width has to be tracked explicitly instead (kept in sync on
-    -- resize, see the grip's OnUpdate and RestyleAll above) since a
-    -- ScrollFrame's own GetWidth() is anchor-derived and not reliably
-    -- readable right after a size change on this client.
+    -- The scroll child must not be anchored (SetScrollChild positions
+    -- it). Its width is set explicitly and kept in sync on resize, since
+    -- the ScrollFrame's own width can read stale right after a resize.
     local barParent = CreateFrame("Frame", nil, barScroll)
     barParent:SetWidth(f:GetWidth() - 12)
     barParent:SetHeight(MAX_BARS * (CL.GetBarHeight(BAR_HEIGHT) + BAR_GAP))
@@ -1206,9 +1077,8 @@ local function CreateWindowFrame(inst)
         inst.bars[i] = CreateBar(inst, barParent, i)
     end
 
-    -- Bottom-right resize grip, same tinted-square approach as
-    -- LootLedger's (Blizzard's chat-frame resize texture doesn't render
-    -- on this client).
+    -- Bottom-right resize grip: a tinted square (the chat-frame resize
+    -- texture doesn't render on this client).
     local grip = CreateFrame("Button", nil, f)
     grip:SetWidth(16)
     grip:SetHeight(16)
@@ -1345,17 +1215,8 @@ RefreshInstance = function(inst)
             if pct > 1 then pct = 1 end
             if entry.isAgroMarker then pct = 1 end -- always full-width, a reference line not a real total
             bar.targetPct = pct
-            -- Smoothing looks nice mid-fight (bars glide instead of
-            -- jumping every refresh tick), but that same glide is what
-            -- made the STOP itself feel laggy - the encounter's data
-            -- finalizes instantly (see Aggregator.lua's FinishEncounter/
-            -- EndEncounter), yet the bar could still take up to ~1s to
-            -- visually catch up to its true final length. Snap straight
-            -- to the target instead of animating whenever there's no
-            -- live encounter actually running (i.e. Current Fight is
-            -- showing the frozen last-finished result, not a fight in
-            -- progress) - the glide only applies while something's
-            -- actually still live to glide toward.
+            -- Bars glide only while a fight is live; a finished Current
+            -- Fight snaps to its final values so the end looks instant.
             local shouldSnap = not CL.IsSmoothBars()
                 or (not isThreat and window.segment == "current" and not CL.Aggregator.GetCurrent())
             if shouldSnap then
@@ -1367,12 +1228,8 @@ RefreshInstance = function(inst)
                 bar.valueText:SetText("+" .. FormatNumber(entry.total))
             elseif isThreat then
                 rank = rank + 1
-                -- TWThreat makes the player's own row solid red instead
-                -- of another class-colored bar, which is much easier to
-                -- find at a glance in a moving threat list. Keep this
-                -- unconditional treatment inside Threat mode only;
-                -- Damage/Healing/etc. retain their existing class colors
-                -- and optional user-configured self border below.
+                -- The player's own threat row is solid red so it stands
+                -- out in a moving list (Threat mode only).
                 if entry.name == UnitName("player") then
                     bar:SetStatusBarColor(1, 0.2, 0.2, 1)
                 else
@@ -1396,15 +1253,9 @@ RefreshInstance = function(inst)
                 end
             end
 
-            -- Bar border - two independent Options settings (each with
-            -- its own user-pickable color) sharing one overlay frame
-            -- (see CreateBar). "Highlight my bar" (self only) wins
-            -- whenever it applies, since the whole point is picking your
-            -- own row out at a glance - a same-colored general border
-            -- around every bar would defeat that. Otherwise "Show bar
-            -- border" applies its own color to every row. Neither ever
-            -- applies to the agro marker - it's a reference line, not a
-            -- real player row.
+            -- Bar border: "Highlight my bar" (own row) takes precedence
+            -- over "Show bar border" (every row); the aggro marker gets
+            -- neither.
             if entry.isAgroMarker then
                 bar.borderFrame:SetBackdropBorderColor(1, 1, 1, 0)
             elseif CL.GetSetting("highlightSelf") and entry.name == UnitName("player") then
@@ -1417,12 +1268,9 @@ RefreshInstance = function(inst)
                 bar.borderFrame:SetBackdropBorderColor(1, 1, 1, 0)
             end
 
-            -- Class icon - opt-in (Options: "Show class icon"), and
-            -- only for entries that resolved a real class (not the
-            -- aggro-marker reference row, and not mobs/unresolved
-            -- units, which have no classToken at all). SetPoint on the
-            -- same anchor point ("LEFT") replaces the previous one, so
-            -- this doesn't need a ClearAllPoints first.
+            -- Class icon (Options: "Show class icon"), only for entries
+            -- with a known class. Re-setting the LEFT point replaces the
+            -- previous one.
             if not entry.isAgroMarker and CL.GetSetting("showClassIcon") and entry.classToken and CL.CLASS_ICON_TCOORDS[entry.classToken] then
                 local coords = CL.CLASS_ICON_TCOORDS[entry.classToken]
                 bar.classIcon:SetTexCoord(coords[1], coords[2], coords[3], coords[4])
@@ -1441,13 +1289,9 @@ RefreshInstance = function(inst)
         end
     end
 
-    -- Scroll child's height tracks how many entries are actually shown,
-    -- not the full MAX_BARS pool - otherwise the scroll range extends
-    -- into empty unused pool space past the real last bar. Only touched
-    -- when the count actually changes, not every 0.2s refresh - this
-    -- client doesn't reliably keep a ScrollFrame's scroll range usable
-    -- under constant SetHeight churn on its scroll child (same class of
-    -- geometry-staleness issue documented elsewhere in this addon).
+    -- The scroll child is sized to the bars shown (not the whole pool),
+    -- and only resized when that count changes: constant SetHeight calls
+    -- on a scroll child leave its scroll range unreliable on this client.
     if shown ~= inst.lastShownCount then
         inst.lastShownCount = shown
         window.barParent:SetHeight(math.max(shown, 1) * (CL.GetBarHeight(BAR_HEIGHT) + BAR_GAP))
@@ -1463,14 +1307,9 @@ RefreshInstance = function(inst)
     end
 end
 
--- Threat mode's stand-in for the segment button (see UpdateSegButtonFor
--- Mode in CreateWindowFrame) - a toggle list of every known raid/party
--- name instead of Current/Overall/History. Reuses the same shared
--- ShowDropdown/dropdownFrame as everything else; each row's onClick
--- toggles that name and re-opens itself immediately after ShowDropdown
--- closes it, which reads as a dropdown that "stays open" for picking
--- several names in one go without actually needing a second dropdown
--- implementation that behaves differently from every other menu here.
+-- Threat mode's segment button: a name filter listing every group
+-- member. Each click toggles a name and reopens the menu, so several
+-- names can be picked in one go with the shared dropdown.
 ShowThreatFilterDropdown = function(inst)
     local f = inst.frame
     local names = (CL.Threat and CL.Threat.GetRosterNames and CL.Threat.GetRosterNames()) or {}
@@ -1600,13 +1439,9 @@ local function IsGrouped()
         or ((GetNumPartyMembers and GetNumPartyMembers()) or 0) > 0
 end
 
--- Whether id's own Auto-hide/Grouped-only rules currently forbid
--- showing it, given LIVE combat/group state right now. Shared by
--- login/reload restore (below) and by Options' Hide/Grouped checkboxes
--- (UI_Options.lua) - unchecking one of those two shouldn't force the
--- window into view if the OTHER rule still says it shouldn't be up
--- (e.g. unchecking Auto-hide while Grouped-only is on and you're
--- solo used to show the window anyway, which was wrong).
+-- Whether window `id`'s Auto-hide / Grouped-only rules forbid showing it
+-- right now (live combat and group state). Both rules apply together:
+-- clearing one doesn't show the window if the other still forbids it.
 function UI.IsSuppressedNow(id)
     local onlyGrouped = CL.GetWindowOption(id, "onlyShowGrouped", false)
     if onlyGrouped and not IsGrouped() then return true end
@@ -1615,14 +1450,10 @@ function UI.IsSuppressedNow(id)
     return false
 end
 
--- Restores every window (main + every remembered extra) at login/
--- reload, honoring each window's own Auto-hide/Grouped-only rules
--- instead of unconditionally showing everything and letting the first
--- combat/group event sort it out later - a window set to only ever be
--- up while grouped-and-fighting shouldn't flash on-screen at login just
--- because nothing has "happened" yet to hide it again. Auto-show plays
--- no part here on purpose - it's a "combat just started" trigger, not a
--- statement about the window's resting state.
+-- Recreates every remembered window at login/reload, shown or hidden
+-- per its Auto-hide/Grouped-only rules so nothing flashes up that
+-- shouldn't be there. Auto-show isn't consulted: it reacts to combat
+-- starting, not to a window's resting state.
 function UI.RestoreAllWindows()
     local function RestoreOne(id, inst)
         if UI.IsSuppressedNow(id) then
@@ -1652,22 +1483,10 @@ end
 
 local mainInst = NewInstance("main")
 
--- Show/Hide/Toggle apply to EVERY open window now, not just main - the
--- minimap icon's left-click, /cl toggle, and auto-show-in-combat/auto-
--- hide-out-of-combat are all addon-wide behaviors, not main-window-only
--- ones, and with extra windows no longer having their own close button
--- (see CreateWindowFrame - creation/closing is Options-only now), main
--- was the only thing responding to any of them, leaving secondary
--- meters stuck showing (or hidden) regardless. Toggle's own on/off
--- decision still keys off mainInst specifically, treating it as the
--- reference point for "are we currently shown."
---
--- Show skips any window UI.IsSuppressedNow says shouldn't be up right
--- now (Grouped-only and you're solo, or Auto-hide and you're out of
--- combat) - a manual toggle used to force EVERY window on regardless,
--- which directly defeated the point of those settings (a Threat meter
--- set to grouped-only would still pop up solo the moment you clicked
--- the minimap icon).
+-- Show/Hide/Toggle act on every meter window (minimap click, /cl
+-- toggle, keybind). Toggle decides on/off from the main window's state.
+-- Show skips windows whose own rules forbid them right now
+-- (UI.IsSuppressedNow).
 function UI.Show()
     local id, inst
     for id, inst in pairs(instances) do
@@ -1692,13 +1511,8 @@ function UI.Toggle()
     end
 end
 
--- One-time copy of Main's current size/position onto another window -
--- not a persistent link, so either window can still be freely resized/
--- moved afterward without dragging the other one along. Reuses
--- CL.SaveLayout (normally called from a window's own resize-grip/drag
--- handlers on itself) by pointing it at mainInst's frame but saving
--- under the TARGET window's id, then re-applies that saved layout to
--- the target's actual frame if it's currently open.
+-- One-time copy of Main's size/position onto window `id` (not a lasting
+-- link): Main's layout is saved under `id`, then applied if it's open.
 function UI.MirrorMainLayout(id)
     if id == "main" or not mainInst.frame then return end
     CL.SaveLayout(id, mainInst.frame)
@@ -1745,17 +1559,9 @@ function UI.ApplyAutoHide()
     end
 end
 
--- Called on any group roster change - a window with "Only show while
--- grouped" hides immediately the moment you're no longer grouped, and
--- shows immediately the moment you're grouped again, PROVIDED nothing
--- else currently required is still missing - UI.IsSuppressedNow already
--- encodes that combined rule (Grouped-only needs grouped, Auto-hide
--- needs combat, independently of each other), so joining a group alone
--- is enough to reveal a Grouped-only window that doesn't also have
--- Auto-hide on, without waiting for combat to start - this used to
--- hard-require being in combat unconditionally, which was wrong
--- whenever Auto-hide wasn't checked (i.e. combat was never actually a
--- requirement for that window in the first place).
+-- On roster changes: "Only show while grouped" windows hide when you
+-- leave a group and reappear when you join one, unless their other rules
+-- (UI.IsSuppressedNow) still forbid it.
 function UI.ReconcileGroupVisibility()
     local id, inst
     for id, inst in pairs(instances) do
@@ -1796,11 +1602,8 @@ function UI.RefreshMode(mode)
     end
 end
 
--- Threat.lua polls the server on its own timer only while this is true,
--- rather than unconditionally every 0.5s regardless of whether anyone's
--- actually looking at Threat mode - same reasoning TWThreat's own
--- update loop uses (it only queries while at least one of its display
--- features is actually enabled).
+-- Whether any shown window is in `mode` (Threat.lua only polls the
+-- server while Threat mode is visible).
 function UI.IsModeVisible(mode)
     local id, inst
     for id, inst in pairs(instances) do
@@ -1824,15 +1627,12 @@ function UI.ShowHistoryEncounter(encounter)
     UI.ShowHistoryEncounterIn(mainInst, encounter)
 end
 
--- Throttled refresh loop for every open window - only does work while a
--- window is actually shown (RefreshInstance bails immediately
--- otherwise). Bar-value smoothing runs every frame, separately from the
--- throttle, so bars glide toward their new value instead of jumping -
--- like Details' animated bars - rather than only updating in
--- REFRESH_INTERVAL-sized steps.
+-- Refresh loop for every shown window. Bar smoothing runs every frame so
+-- bars glide to their new values; redraws run at most every
+-- REFRESH_INTERVAL and only when something could have changed.
 local driver = CreateFrame("Frame")
 local accum = 0
-driver:SetScript("OnUpdate", function()
+local function DriverTick()
     local id, inst
     for id, inst in pairs(instances) do
         local window = inst.frame
@@ -1879,6 +1679,10 @@ driver:SetScript("OnUpdate", function()
             end
         end
     end
+end
+driver:SetScript("OnUpdate", function()
+    local ok, err = pcall(DriverTick)
+    if not ok then CL.RecordError("UI:refresh", err) end
 end)
 
 StaticPopupDialogs["COMBATLEDGER_RESET_OVERALL"] = {
@@ -1931,10 +1735,6 @@ StaticPopupDialogs["COMBATLEDGER_ANNOUNCE"] = {
     exclusive = 1,
 }
 
--- NOT called here at file-load time - this client restores the real
--- CombatLedgerDB from disk AFTER all files finish executing, so
--- CreateWindowFrame's CL.ApplyLayout would always read an empty
--- placeholder and silently never restore the saved size/position (every
--- reload, not just occasionally). Events.lua's first PLAYER_ENTERING_WORLD
--- calls UI.RestoreAllWindows() instead, once the real saved data is
--- actually there.
+-- Windows aren't created at file load: SavedVariables (and so saved
+-- layouts) aren't available until after every file has run. Events.lua
+-- calls UI.RestoreAllWindows() on the first PLAYER_ENTERING_WORLD.

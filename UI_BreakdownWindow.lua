@@ -102,21 +102,14 @@ local selectedKey = nil -- stable id (see BuildSpellList) for whichever ability 
 local selectedTargetGuid = nil -- click a target row to filter the ability list to just what hit them
 local lastTargetCount = -1 -- only re-layout the left column when this actually changes (see BD.Refresh)
 
--- One shared breakdown popup regardless of how many meter windows are
--- open - clicking a bar in any of them opens this same window, so it
--- has to remember which window's mode/segment (and, for a history
--- click, which saved encounter) it was opened from explicitly rather
--- than asking a single "the" meter window (there isn't one anymore).
+-- One breakdown window shared by every meter window, so it remembers
+-- the mode/segment (and History encounter) it was opened from.
 local currentMode = "damage"
 local currentSegment = "current"
 local currentHistoryEncounter = nil
 
--- Funnels currentMode/currentSegment/currentHistoryEncounter/CL through
--- a single upvalue (this function) instead of BD.Refresh referencing
--- all three module locals directly - BD.Refresh is already a very large
--- function and vanilla's Lua 5.0 caps a function at 32 upvalues; adding
--- these three as direct references there was enough to tip it over
--- ("too many upvalues" load error).
+-- Returns mode, segment and encounter for the breakdown. A separate
+-- function so BD.Refresh stays under Lua 5.0's 32-upvalue limit.
 local function ResolveActiveState()
     local enc
     if CL.testMode then
@@ -155,11 +148,9 @@ local function BuildSpellList(bucket)
     local list = {}
     if not bucket then return list end
 
-    -- Main-hand and off-hand show as one combined row (that's what a
-    -- player thinks of as "my melee damage"), but the detail panel needs
-    -- both raw entries kept separately - main-hand and off-hand have
-    -- different hit caps, so their miss/dodge/parry rates genuinely
-    -- aren't the same number and shouldn't be blended together.
+    -- Main-hand and off-hand share one row, but the entry keeps both so
+    -- the detail panel can show their avoidance separately (different
+    -- hit caps).
     -- Main-hand + off-hand mitigation merged for the combined melee row
     -- (see Aggregator.lua's ApplyMitigation) - nil if neither has any.
     local function MergeMit(a, b)
@@ -389,13 +380,8 @@ local function GetDetailRow(parent, index)
         CL.ApplyFont(right, CL.GetFontSize())
         row.right = right
 
-        -- Icon slot - only ever shown for the "Top Ability" row (see
-        -- Line()'s optional icon param below), hidden/no-op for every
-        -- other label/value row this same row template backs (Total,
-        -- Rate, Hits, ...). Space is reserved unconditionally (left text
-        -- always anchors off it) rather than only when shown, so a row
-        -- with an icon doesn't sit at a different text x-offset than one
-        -- without.
+        -- Icon slot, used by the "Top Ability" row only. Its space is
+        -- always reserved so every row's text lines up.
         local icon = row:CreateTexture(nil, "OVERLAY")
         icon:SetWidth(DETAIL_ROW_HEIGHT - 2)
         icon:SetHeight(DETAIL_ROW_HEIGHT - 2)
@@ -491,12 +477,8 @@ local function CreateWindow()
     local allEnemiesBar = CreateAllEnemiesBar(targetParent)
     f.allEnemiesBar = allEnemiesBar
 
-    -- Two-point anchor (TOPLEFT + BOTTOMRIGHT, both relative to the same
-    -- leftPane) rather than mixing a TOPLEFT/TOPRIGHT pair with a single
-    -- BOTTOM point anchored to a different frame - that combination is
-    -- ambiguous (BOTTOM also tries to horizontally center against
-    -- targetsLabel, fighting the width already fixed by TOPLEFT/
-    -- TOPRIGHT) and leaves GetHeight() unreliable.
+    -- Anchored by TOPLEFT + BOTTOMRIGHT on the same pane so its height
+    -- is well defined.
     local barParent = CreateFrame("Frame", nil, leftPane)
     f.barParent = barParent
     for i = 1, MAX_BARS do
@@ -553,12 +535,8 @@ local function CreateWindow()
     divider:SetPoint("BOTTOM", f, "BOTTOM", 0, FOOTER_GAP)
     divider:SetTexture(0.4, 0.4, 0.4, 0.6)
 
-    -- Only shown for a specific selected ability (real spellId/melee
-    -- icon available) - hidden for the no-selection "Overall" summary,
-    -- which doesn't correspond to any one ability. detailName's LEFT
-    -- anchor moves onto this icon's RIGHT edge when it's shown (see
-    -- RefreshDetailPanel), same "no fixed reserved gap" reasoning as
-    -- the main window's class icon.
+    -- Shown only for a selected ability (not the Overall summary);
+    -- detailName moves right of it while shown (RefreshDetailPanel).
     local detailIcon = rightPane:CreateTexture(nil, "OVERLAY")
     detailIcon:SetWidth(DETAIL_ICON_SIZE)
     detailIcon:SetHeight(DETAIL_ICON_SIZE)
@@ -783,17 +761,9 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
     Line("Rate", FormatNumber(entry.total / (duration or 1)) .. " " .. CL.RateSuffix(mode))
     if mode == "healing" then CL.AddOverhealLines(entry, DimLine) end
 
-    -- A pure DoT (Curse of Agony) has no direct-hit component, so "Hits"
-    -- and the Ticks line below would just repeat the same number under
-    -- two labels - call it "Casts" instead, sourced from entry.casts
-    -- (Events.lua's HandleAuraCast/Aggregator's RecordCast, fires once
-    -- per actual cast, not once per tick - see Aggregator.lua's
-    -- RecordCastInto). Falls back to entry.hits if casts wasn't tracked
-    -- (per-target sub-entries don't get it - see RecordCastInto). A
-    -- spell with BOTH a direct hit and ticks (Rake/Immolate) skips this
-    -- line entirely - Direct Hits/Ticks below already cover it, and a
-    -- blended "Hits" on top would just be noise. A normal ability
-    -- (neither) keeps plain "Hits".
+    -- Count line: "Casts" for a pure DoT (its hits are ticks; falls back
+    -- to hits where casts weren't tracked), nothing for a spell with both
+    -- direct hits and ticks (the lines below cover it), "Hits" otherwise.
     local hasTicks = entry.tickHits and entry.tickHits.hits > 0
     local hasDirect = entry.directHits and entry.directHits.hits > 0
     if hasTicks and hasDirect then
@@ -804,16 +774,9 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         Line("Hits", tostring(entry.hits or 0))
     end
 
-    -- A spell like Rake or Immolate has TWO differently-shaped damage
-    -- components under one spellId: an initial direct hit (can crit)
-    -- and a DoT tick (never can - see Events.lua's IsPeriodicEffect).
-    -- One blended min/max across both reads as "weird" (the crit sets
-    -- max, a tick sets min, neither number describes a real single
-    -- category of hit) - split into two lines instead whenever a spell
-    -- actually has both. Untouched for every other spell (pure direct
-    -- damage, or a pure DoT with no separate initial hit). Kept right
-    -- under Casts/Hits (not down by Crits/Avg normal hit) so the
-    -- hit-count breakdown reads as one consistent block.
+    -- Spells with both a direct hit and DoT ticks (Rake, Immolate) get
+    -- separate count and min/max lines for each, since one blended range
+    -- would describe neither.
     if hasTicks then
         local dh = entry.directHits
         if dh and dh.hits > 0 then
@@ -922,23 +885,16 @@ function BD.Refresh()
     local targets = (mode ~= "deaths") and BuildTargetList(u, mode) or {}
     local targetCount = table.getn(targets)
     if targetCount > MAX_TARGET_BARS then targetCount = MAX_TARGET_BARS end
-    -- Only actually re-anchor when the count changes, not every refresh
-    -- (5x/second otherwise) - this client doesn't reliably redraw a
-    -- frame's backdrop/bounds after ClearAllPoints()+SetPoint() unless
-    -- something else (a drag) forces a layout pass, so anchor churn
-    -- here leaves stale/ghosted rendering behind and lets GetHeight()
-    -- reads lag a refresh behind the real geometry.
+    -- Re-anchor only when the count changes: repeated re-anchoring
+    -- leaves stale rendering and stale GetHeight() reads on this client.
     if targetCount ~= lastTargetCount and window.LayoutLeftColumn then
         window.LayoutLeftColumn(targetCount)
         lastTargetCount = targetCount
     end
 
-    -- A selected target (click a row in Targets:/Healed:/Attackers:)
-    -- filters the ability list to just that one - same bucket shape as
-    -- the unit-wide one (see Aggregator.lua), so BuildSpellList doesn't
-    -- need to know the difference. Falls back to the unit-wide view if
-    -- the target fell out of the list (e.g. after a reset) or mode
-    -- changed away (Deaths has no per-target breakdown).
+    -- A selected target filters the ability list to that target's own
+    -- sub-bucket (same shape as the unit's). Falls back to the unit-wide
+    -- view if the target is gone (reset, compaction, mode change).
     local modeBucket = ModeBucket(u, mode)
     local filteredTarget = nil
     if selectedTargetGuid and mode ~= "deaths" and modeBucket and modeBucket.targets then
@@ -972,15 +928,9 @@ function BD.Refresh()
     end
 
     local themeR, themeG, themeB = CL.GetThemeColor()
-    -- Fixed-size bars always (no stretch-to-fill), capped to however
-    -- many actually fit above the Targets area - computed analytically
-    -- from window:GetHeight() (a value we directly SetHeight, so it's
-    -- reliable) and the known fixed offsets, rather than reading
-    -- barParent:GetHeight() (anchor-derived only, and this client
-    -- doesn't reliably report that right after an anchor change - same
-    -- issue as the Targets layout above). Without this cap, too many
-    -- abilities for the window's current height would overflow past
-    -- barParent and render on top of the Targets rows below it.
+    -- Show only as many fixed-size bars as fit above the Targets area,
+    -- computed from window:GetHeight() and the fixed offsets (anchor-
+    -- derived heights can read stale right after a layout change).
     local barHeight = CL.GetBarHeight(BAR_HEIGHT)
     local windowHeight = window:GetHeight()
     local reserved = HEADER_HEIGHT + FOOTER_GAP
@@ -1170,7 +1120,7 @@ end
 
 local driver = CreateFrame("Frame")
 local accum = 0
-driver:SetScript("OnUpdate", function()
+local function DriverTick()
     accum = accum + arg1
     if accum < REFRESH_INTERVAL then return end
     accum = 0
@@ -1184,4 +1134,8 @@ driver:SetScript("OnUpdate", function()
         or not drawnAt or (now - drawnAt) >= IDLE_REFRESH_SECONDS then
         BD.Refresh()
     end
+end
+driver:SetScript("OnUpdate", function()
+    local ok, err = pcall(DriverTick)
+    if not ok then CL.RecordError("Breakdown:refresh", err) end
 end)

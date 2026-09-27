@@ -15,12 +15,8 @@ local CL = CombatLedger
 local OPT = {}
 CL.UIOptions = OPT
 
--- WINDOW_HEIGHT fits the Advanced tab's worst case (every row slot
--- full - 3 NextY() lines each: name/close, show/hide/grouped toggles,
--- mirror button) plus bottom padding - see the row-building loop below.
--- RefreshOptionsWindow reflows resetPosBtn up to sit right after
--- however many windows actually exist, so this is a ceiling, not what
--- most people will actually see below their last row.
+-- WINDOW_HEIGHT fits the Advanced tab with every window row in use
+-- (MAX_WINDOW_ROWS rows of three lines each) plus padding.
 local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 700 -- +24 over the prior ceiling for the "Ask before clearing" row (join-party clear is now two checkboxes, not one)
 local MAX_WINDOW_ROWS = 4 -- most people won't run more than 2-3 extra meter windows at once
 local ROW_HEIGHT = 24
@@ -51,12 +47,8 @@ local function CreateSmallButton(parent, width, text)
     return btn
 end
 
--- Small color-preview swatch, anchored to the left of a checkbox - click
--- opens Blizzard's own ColorPickerFrame, previews the live selection as
--- it changes, and reverts to whatever it was on Cancel (its own Cancel
--- button, or closing the picker without confirming), same as every
--- other Blizzard color picker use. Shared by "Highlight my bar" and
--- "Show bar border" below, which each just pass their own settingKey.
+-- Color swatch for a {r, g, b} setting: opens ColorPickerFrame, applies
+-- the color live while picking, and reverts on Cancel.
 local function CreateColorSwatch(parent, anchorCB, settingKey, tooltipText)
     local swatch = CreateFrame("Button", nil, parent)
     swatch:SetWidth(16)
@@ -188,12 +180,8 @@ local function CreateWindow()
     closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
     closeBtn:SetScript("OnClick", function() f:Hide() end)
 
-    -- Two tabs instead of one long scroll of sections - General (window
-    -- behavior/appearance/bar animation) and Advanced (timing/announce/
-    -- windows). Same "avoid Blizzard's heavier templates" reasoning as
-    -- the rest of this addon's UI (ShowDropdown instead of
-    -- UIDropDownMenu, etc) - two plain buttons + two content frames
-    -- toggled together, not a real TabButtonTemplate strip.
+    -- Two tabs, General (behavior/appearance) and Advanced (announce,
+    -- data, windows): two plain buttons toggling two content frames.
     local pageGeneral = CreateFrame("Frame", nil, f)
     pageGeneral:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
     pageGeneral:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 0)
@@ -274,9 +262,7 @@ local function CreateWindow()
     end)
     f.minimapCB = minimapCB
 
-    -- Auto-show/auto-hide used to be global checkboxes here - now
-    -- per-window (see the Windows section on the Advanced tab), since a
-    -- Threat meter and an always-on Damage meter want different rules.
+    -- Auto-show/auto-hide are per window (Advanced tab, Windows section).
 
     -- Appearance
     AddDivider(pageGeneral)
@@ -303,11 +289,8 @@ local function CreateWindow()
     end
     f.matchPfuiCB = matchPfuiCB
 
-    -- "Dock in pfUI chat panel" removed for now - the dock never worked
-    -- reliably and isn't worth fixing right now. UI_PfuiDock.lua itself
-    -- is untouched (still there if this gets revisited later), just
-    -- unreachable from Options now - pfuiDock stays false forever with
-    -- no control to flip it.
+    -- No control for pfUI docking (UI_PfuiDock.lua): it isn't reliable
+    -- yet, so the pfuiDock setting stays off.
 
     local textureLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     y = NextY()
@@ -331,8 +314,7 @@ local function CreateWindow()
     end)
     f.textureBtn = textureBtn
 
-    -- ShaguDPS-style borderless window - independent of Match pfUI (see
-    -- CL.ApplyWindowSkin's hideBorder branch).
+    -- Borderless window (manual skin only - see CL.ApplyWindowSkin).
     local hideBorderLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     y = NextY()
     hideBorderLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
@@ -689,15 +671,10 @@ local function CreateWindow()
     end)
     f.testCB = testCB
 
-    -- Auto-resets (or offers to reset) the Overall segment the instant
-    -- you go from solo to grouped (see Events.lua's
-    -- PARTY_MEMBERS_CHANGED/RAID_ROSTER_UPDATE handler) - handy for
-    -- keeping Overall meaning "this raid" instead of carrying over
-    -- whatever solo grinding happened beforehand. Doesn't touch Current
-    -- Fight or saved History, same as the R (Reset) button. Two
-    -- checkboxes acting as one 3-way choice (off/always/ask) instead of
-    -- a dropdown - checking one unchecks the other; unchecking the
-    -- active one goes back to off.
+    -- Clear Overall on going from solo to grouped (Events.lua), so it
+    -- covers just this group; Current Fight and History are untouched.
+    -- Two checkboxes form one off/always/ask choice: checking one
+    -- unchecks the other, unchecking the active one means off.
     local clearAlwaysLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     y = NextY()
     clearAlwaysLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
@@ -734,13 +711,9 @@ local function CreateWindow()
     end)
     f.clearOnJoinAskCB = clearOnJoinAskCB
 
-    -- Windows - "main" (this addon's original single window) always
-    -- exists and isn't listed here; extra windows are what "+ New
-    -- Window" creates, each an independent mode/segment/size/position
-    -- (see UI_MainWindow.lua's instance factory) so e.g. Healing can sit
-    -- in one window while Damage sits in another. Fixed-size row pool
-    -- (MAX_WINDOW_ROWS) like the rest of this window's fixed layout,
-    -- not a scroll list - refreshed from CL.UI.GetWindowList() below.
+    -- Windows list: one row per meter window (from CL.UI.GetWindowList),
+    -- each with its own mode, segment, size and position. A fixed pool of
+    -- MAX_WINDOW_ROWS rows, not a scroll list.
     AddDivider(pageAdvanced)
     local windowsHeader = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     y = NextY()
@@ -758,18 +731,11 @@ local function CreateWindow()
     end)
     f.newWindowBtn = newWindowBtn
 
-    -- Each row is three lines now: name + close button on top, this
-    -- window's own auto-show/auto-hide/grouped-only toggles below that,
-    -- then a "Mirror Main" button (extra windows only - a one-time copy
-    -- of Main's current size/position, not a persistent link) - takes
-    -- three NextY() slots' worth of vertical space per row instead of
-    -- one (see the matching WINDOW_HEIGHT bump).
-    -- Captured so RefreshOptionsWindow can reflow resetPosBtn to sit
-    -- right after however many windows actually exist right now,
-    -- instead of always leaving room for the full MAX_WINDOW_ROWS - most
-    -- people only run 1-2 extra windows, so the fixed layout used to
-    -- leave a big dead gap between the last real row and everything
-    -- below it.
+    -- Each row takes three lines: name + close button; the window's
+    -- auto-show/auto-hide/grouped-only toggles; and (extra windows only)
+    -- "Mirror Main", a one-time copy of Main's size/position.
+    -- The start offset is kept so RefreshOptionsWindow can place
+    -- resetPosBtn right after the rows that actually exist.
     local windowRowsStartY = yOffset
     local ROW_SLOT_HEIGHT = 3 * ROW_HEIGHT
     f.windowRowsStartY = windowRowsStartY
@@ -913,9 +879,7 @@ RefreshOptionsWindow = function()
         window.matchPfuiCB:SetChecked(CL.IsMatchPfui())
     end
 
-    -- " |cff999999v|r" suffix marks these as dropdowns (click opens a
-    -- list via CL.ShowDropdown) rather than the cycle-on-click buttons
-    -- they used to be, which wasn't obvious from a plain value label.
+    -- The " v" suffix marks these buttons as dropdowns.
     window.textureBtn.label:SetText(LabelForKey(CL.GetAvailableBarTextures(), CL.GetSetting("barTexture") or "flat") .. " |cff999999v|r")
     window.hideBorderCB:SetChecked(CL.GetSetting("hideBorder"))
     window.classIconCB:SetChecked(CL.GetSetting("showClassIcon"))
@@ -996,14 +960,9 @@ RefreshOptionsWindow = function()
                 row.hideCB:SetScript("OnClick", function()
                     local checked = (this:GetChecked() == 1)
                     CL.SetWindowOption(id, "autoHideOutOfCombat", checked)
-                    -- Take effect right away rather than waiting for the
-                    -- next combat transition, which might not come for a
-                    -- while (or ever, if already out of combat) - checking
-                    -- it hides now if out of combat; unchecking it
-                    -- un-hides now UNLESS Grouped-only is also on and
-                    -- you're not grouped, in which case that rule still
-                    -- says this window shouldn't be up (IsSuppressedNow
-                    -- checks both rules together, not just this one).
+                    -- Applies immediately: checking hides the window if
+                    -- out of combat; unchecking shows it unless another
+                    -- rule still forbids it (UI.IsSuppressedNow).
                     if CL.UI and not UnitAffectingCombat("player") then
                         if checked and CL.UI.ApplyAutoHide then
                             CL.UI.ApplyAutoHide()
@@ -1023,11 +982,7 @@ RefreshOptionsWindow = function()
                             CL.UI.ReconcileGroupVisibility()
                         elseif not checked and CL.UI.ShowWindowById and CL.UI.IsSuppressedNow
                             and not CL.UI.IsSuppressedNow(id) then
-                            -- Same reasoning as Auto-hide above - lifting
-                            -- this restriction should reveal the window
-                            -- now UNLESS Auto-hide is also on and you're
-                            -- out of combat, which still says it should
-                            -- stay hidden.
+                            -- Applies immediately, like Auto-hide above.
                             CL.UI.ShowWindowById(id)
                         end
                     end
@@ -1068,9 +1023,8 @@ function OPT.Show()
 end
 
 --------------------------------------------------------------------------
--- Minimap button - same draggable-icon pattern as LootLedger's own
--- CreateMinimapButton. Left-click toggles the main meter; right-click
--- opens Options.
+-- Minimap button (draggable around the minimap). Left-click toggles the
+-- meter windows; right-click opens Options.
 --------------------------------------------------------------------------
 
 local function CreateMinimapButton()
@@ -1112,12 +1066,9 @@ local function CreateMinimapButton()
     end
     btn.UpdatePosition = UpdatePosition
 
-    -- This client restores the real CombatLedgerDB from disk AFTER this
-    -- file finishes executing (same timing quirk as CL.ApplyLayout - see
-    -- Core.lua), so a saved minimapAngle read right here would always
-    -- be nil - just place it at the default for now, OPT.RefreshMinimap
-    -- Position (called from Events.lua's first PLAYER_ENTERING_WORLD)
-    -- re-reads it once the real data actually exists.
+    -- Placed at the default angle for now: saved settings aren't loaded
+    -- yet. OPT.RefreshMinimapPosition applies the saved angle on the
+    -- first PLAYER_ENTERING_WORLD.
     UpdatePosition(3.93) -- ~225 deg, bottom-left
 
     btn:SetScript("OnDragStart", function()

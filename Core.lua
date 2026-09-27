@@ -1,34 +1,19 @@
 --[[
-    CombatLedger v0.3.0
+    CombatLedger - core: shared namespace, settings and saved layout,
+    appearance helpers, number formatting, diagnostics and the debug log.
 
-    A combat meter built on Nampower's structured combat events
-    (AUTO_ATTACK_SELF/OTHER, SPELL_DAMAGE_EVENT_SELF/OTHER, SPELL_HEAL_BY_*,
-    SPELL_DISPEL_*, AURA_CAST_ON_*/DEBUFF_ADDED_*) instead of parsing
-    CHAT_MSG_COMBAT_* text like most vanilla meters - real numeric fields
-    (damage amount, spell ID, hit type) instead of regexing a localized
-    string.
-
-    Tracks Damage/Healing/Damage Taken/Dispels/Debuffs Given/Deaths, each
-    with a click-through per-ability/per-target breakdown, across any
-    number of independent meter windows (see UI_MainWindow.lua), plus
-    Current Fight/Overall/saved History segments and a death recap. Set
-    CL.debug = true (or /cl debug) to log every raw event to
-    CL.LOG_FILENAME via LogLine/FlushLog below - chat gets unreadable fast
-    under real combat event volume, so verification goes to a plain file
-    instead.
+    CombatLedger reads Nampower's structured combat events (GUIDs, spell
+    ids, raw amounts, hit flags) rather than parsing localized combat-log
+    text. Load order (.toc): Core, GuidCache, Aggregator, Threat, Events,
+    History, then the UI files.
 ]]
 
--- Shared namespace table - every other file attaches its own pieces to
--- this (CL.GuidCache, CL.Aggregator, ...) since plain `local`s don't
--- cross file boundaries the way they do in LootLedger's single-file
--- layout. Each file starts with `local CL = CombatLedger`.
+-- Shared namespace; every file starts with `local CL = CombatLedger` and
+-- attaches its module (CL.GuidCache, CL.Aggregator, ...).
 CombatLedger = CombatLedger or {}
 local CL = CombatLedger
 
--- Keybind support - Bindings.xml maps the key to CombatLedger.UI.Toggle()
--- via this action name; these globals supply the label text shown in
--- the Blizzard Key Bindings panel (BINDING_HEADER_/BINDING_NAME_ is the
--- vanilla 1.12 convention, not a CombatLedger-specific mechanism).
+-- Key Bindings panel labels for Bindings.xml's toggle action.
 BINDING_HEADER_COMBATLEDGER_TITLE = "CombatLedger"
 BINDING_NAME_COMBATLEDGER_TOGGLE = "Toggle CombatLedger windows"
 
@@ -37,17 +22,14 @@ CombatLedgerDB.encounters = CombatLedgerDB.encounters or {}
 CombatLedgerDB.settings = CombatLedgerDB.settings or {}
 CL.db = CombatLedgerDB
 
--- Encounter-end timing - deliberately NOT a user setting (no Options
--- control, no /cl set). Combat dropping (PLAYER_REGEN_ENABLED) IS the
--- end of an encounter, immediately, no tolerance window - see Events.lua.
--- This is the one remaining fallback: some targets (training dummies on
--- at least this server) never toggle the regen flag at all, so an
--- encounter against one would otherwise never end. No combat event of
--- any kind for this long force-ends it regardless of regen state.
+-- Idle fallback for ending an encounter: this long without a relevant
+-- combat event ends it even if combat state never changed (training
+-- dummies don't toggle regen). Normal ends are combat-state driven - see
+-- Events.lua's encounter lifecycle.
 CL.IDLE_SECONDS = 12
 
--- Tunable settings, saved-variable-backed so they survive /reload and
--- exposed in the Options window - see UI_Options.lua.
+-- User settings with their defaults (edited in UI_Options.lua). Only
+-- values that differ from these are stored in CombatLedgerDB.settings.
 CL.defaultSettings = {
     matchPfui = true, -- while true (and pfUI is loaded), bar texture + font mirror pfUI's own instead of barTexture/fontKey/fontSize below
     barTexture = "flat", -- pfUI's own flat bar look, bundled in img/bar.tga (see CL.GetBarTexture) - the default even without pfUI installed
@@ -62,15 +44,13 @@ CL.defaultSettings = {
     showMinimapButton = true,
     announceChannel = "auto", -- "auto" (raid > party > say) / "say" / "party" / "raid" / "guild"
     announceCount = 5,
-    windowOpacityPct = 81, -- background alpha, as a percent - ignored while matchPfui is on (81 matches the flat skin's pfUI-derived look)
-    -- autoShowInCombat/autoHideOutOfCombat used to live here - now
-    -- per-window via CL.GetWindowOption/SetWindowOption (see below),
-    -- since different meter windows want different behavior.
+    windowOpacityPct = 81, -- background alpha, as a percent - ignored while matchPfui is on
+    -- Auto-show/auto-hide/grouped-only are per window: CL.GetWindowOption.
     pfuiDock = false, -- dock the main window into pfUI's right chat panel (see UI_PfuiDock.lua) - opt-in, since it moves/resizes the window
     showClassIcon = false, -- class icon before the name on each bar - opt-in, redundant with the existing class-colored bar fill for some tastes
     classColorMenus = false, -- header/dropdown buttons take the player's class color instead of the flat near-black default - see CL.ApplyButtonSkin
     highlightSelf = false, -- border around whichever bar is the player's own, in highlightSelfColor below - opt-in, some people find a border on every meter distracting
-    highlightSelfColor = { 1, 0.82, 0 }, -- user-customizable via Options' color picker - gold by default, matching this addon's existing "pay attention to this" accent color
+    highlightSelfColor = { 1, 0.82, 0 }, -- Options color picker; gold by default
     barBorderEnabled = false, -- border around EVERY bar, in barBorderColor below - independent of highlightSelf, which always wins on your own row regardless of this
     barBorderColor = { 1, 1, 1 }, -- user-customizable via Options' color picker
     clearOnJoinPartyMode = "off", -- "off" / "always" / "ask" - auto-resets (or offers to reset) the Overall segment the moment you go from solo to grouped (party or raid) - see Events.lua's group-change handler
@@ -81,10 +61,9 @@ CL.defaultSettings = {
     mergePets = true, -- pets roll up into their owner's bar in every meter mode (Skada's "Merge pets into owners"); off = pets get their own rows. Threat always keeps pets separate - see Threat.lua
 }
 
--- Defensive rather than relying purely on the load-time "or {}" above:
--- this client restores saved variables from disk AFTER Core.lua's own
--- init line runs, and that restore REPLACES CombatLedgerDB wholesale -
--- an existing save from before .settings existed wipes it back to nil.
+-- SavedVariables are loaded after this file runs and replace
+-- CombatLedgerDB wholesale, so every accessor re-ensures its sub-table
+-- instead of trusting the load-time defaults above.
 local function EnsureSettingsTable()
     if not CombatLedgerDB.settings then
         CombatLedgerDB.settings = {}
@@ -103,11 +82,8 @@ function CL.SetSetting(key, value)
     CombatLedgerDB.settings[key] = value
 end
 
--- Per-window size/position, saved-variable-backed same as settings
--- above (same defensive EnsureX pattern, same reason - this client
--- replaces CombatLedgerDB wholesale on restore, after Core.lua's own
--- init line runs). `key` is a short per-window id ("main", "breakdown",
--- "deathRecap", "history").
+-- Per-window size/position. `key` is a window id ("main", "breakdown",
+-- "deathRecap", "history", or an extra meter window's id).
 local function EnsureLayoutTable()
     if not CombatLedgerDB.layout then
         CombatLedgerDB.layout = {}
@@ -132,13 +108,9 @@ function CL.SaveLayout(key, frame)
     }
 end
 
--- Applies a saved layout if one exists (returns true), otherwise leaves
--- the frame's already-set default width/height/point alone (false).
--- minW/minH/maxW/maxH are optional - clamps a saved size into a
--- window's current bounds, since a size saved under an earlier layout
--- (before a resize/redesign changed that window's min size) could
--- otherwise restore smaller than the new layout can actually fit,
--- leaving elements overlapping instead of properly stacked.
+-- Applies a saved layout if one exists (returns true); otherwise leaves
+-- the frame's defaults alone (false). Optional min/max bounds clamp a
+-- saved size into what the window's current layout can fit.
 function CL.ApplyLayout(key, frame, minW, minH, maxW, maxH)
     local saved = CL.GetLayout(key)
     if not saved then return false end
@@ -159,12 +131,9 @@ function CL.ApplyLayout(key, frame, minW, minH, maxW, maxH)
     return true
 end
 
--- Multi-window support: which extra meter windows (beyond the always-
--- present "main") should exist, and each window's own mode/segment
--- choice - same defensive EnsureX/wholesale-replace reasoning as
--- settings/layout above. Presence of a non-"main" key is what makes
--- UI_MainWindow.lua's UI.RestoreAllWindows() recreate that window on
--- login; UI.CloseExtraWindow removes its key so it doesn't come back.
+-- Meter windows and their mode/segment/threat filter. A non-"main" key
+-- here is what makes UI.RestoreAllWindows recreate that extra window on
+-- login; closing a window forgets its key.
 local function EnsureWindowsTable()
     if not CombatLedgerDB.windows then
         CombatLedgerDB.windows = {}
@@ -189,14 +158,9 @@ function CL.ForgetWindowState(id)
     end
 end
 
--- Per-window auto-show/auto-hide/only-while-grouped toggles - used to
--- be addon-wide settings, but a Threat meter you only want up while
--- grouped and fighting has nothing to do with whether your always-on
--- Damage meter should behave the same way, so each window now carries
--- its own copy. Kept in a separate table from CL.SaveWindowState's
--- mode/segment/threatFilter, which gets wholesale-replaced on every
--- mode/segment change - these would otherwise risk getting clobbered
--- back to stale values by the next unrelated SaveWindowState call.
+-- Per-window behavior toggles (auto-show, auto-hide, grouped only).
+-- Stored apart from SaveWindowState's record, which is replaced whole on
+-- every mode/segment change.
 local function EnsureWindowOptionsTable()
     if not CombatLedgerDB.windowOptions then
         CombatLedgerDB.windowOptions = {}
@@ -232,60 +196,25 @@ function CL.GetExtraWindowIds()
     return ids
 end
 
--- Shared by every StatusBar-based window (UI_MainWindow, UI_Breakdown,
--- UI_DeathRecap) so the meter's bars actually match pfUI's own bars
--- instead of looking like a different addon. pfUI.media["img:bar"] is
--- the exact texture pfUI itself uses for every one of its bars (and
--- what it applies when it skins other addons' status bars too - see
--- pfUI/modules/thirdparty-vanilla.lua).
--- Asks the client's own addon manager directly (IsAddOnLoaded) instead
--- of inferring pfUI's presence from the shape of the `pfUI` global -
--- confirmed on a client with pfUI genuinely not loaded (IsAddOnLoaded
--- returns nil, verified both from the AddOns list and visually - a
--- completely unstyled vanilla UI, no pfUI skin anywhere) that `pfUI`,
--- `pfUI.api`, and even `pfUI.api.CreateBackdrop` as a real callable
--- function were ALL still present. Something else on this client
--- fully populates a pfUI-shaped table without pfUI ever loading, so no
--- amount of inspecting that table's shape can be made reliable -
--- IsAddOnLoaded is authoritative and sidesteps the whole problem.
+-- pfUI presence comes from the addon manager, not the `pfUI` global:
+-- other addons on this client can create a pfUI-shaped table even when
+-- pfUI itself isn't loaded.
 function CL.HasPfui()
     local ok, loaded = pcall(IsAddOnLoaded, "pfUI")
     return ok and loaded and true or false
 end
 
--- "Match pfUI" (default on) mirrors pfUI's own bar texture/font exactly,
--- same as this addon's bars did before Options existed. Turning it off
--- unlocks the manual barTexture/fontKey/fontSize choices below - the
--- Options window greys those controls out while this is on, since
--- they'd have no visible effect.
+-- "Match pfUI" (default on, only with pfUI loaded) uses pfUI's own bar
+-- texture, font and window skin; off, the manual barTexture/fontKey/
+-- fontSize settings apply (Options greys them out while matching).
 function CL.IsMatchPfui()
     return CL.HasPfui() and (CL.GetSetting("matchPfui") ~= false)
 end
 
--- "Flat" is pfUI's own default bar look (img/bar.tga), bundled directly
--- in this addon's own img/ folder (MIT-licensed from pfUI - see
--- README) so it's available and looks identical whether or not pfUI is
--- actually installed - this used to be exclusive to pfUI users via
--- "Match pfUI", which only helps if you already run pfUI. It's the
--- default (see CL.defaultSettings) - Blizzard/Smooth Gradient are still
--- here for anyone who wants the classic look back.
---
--- Previously also listed four "pfui_*" entries (elvui/gradient/striped/
--- tukui) pointing at pfUI.media["img:bar_elvui"] etc. - removed, because
--- those keys don't exist. Checked pfUI's actual source: every single
--- pfUI file that skins a status bar reads pfUI.media["img:bar"] only -
--- that's pfUI's ONE currently-selected bar texture (whatever the user
--- picked in pfUI's own settings), not five separately-registered skin
--- variants. Those four entries always resolved to nil, so cycling onto
--- any of them called SetStatusBarTexture(nil), which silently no-ops
--- and leaves whatever texture was already showing - this is what "bar
--- texture doesn't change" turned out to be.
---
--- Fixed for real by bundling the actual .tga files (img/bar_elvui.tga
--- etc, MIT-licensed from pfUI - see README) directly, same as
--- img/bar.tga - these are genuinely pfUI's own alternate bar skins, just
--- shipped as this addon's own assets instead of a broken lookup into
--- pfUI's media table.
+-- Manual bar textures. All but "blizzard" are bundled in img/ (the
+-- pfUI-derived ones under pfUI's MIT license - see README), so they work
+-- without pfUI installed. pfUI itself only exposes its one selected bar
+-- texture (media["img:bar"]), which is what "Match pfUI" uses instead.
 CL.BAR_TEXTURES = {
     { key = "flat", label = "Flat (default)" },
     { key = "blizzard", label = "Blizzard Default" },
@@ -328,8 +257,7 @@ CL.FONTS = {
     { key = "arial", label = "Arial Narrow", path = "Fonts\\ARIALN.TTF" },
     { key = "skurri", label = "Skurri", path = "Fonts\\SKURRI.TTF" },
     { key = "morpheus", label = "Morpheus", path = "Fonts\\MORPHEUS.ttf" },
-    -- Not a stock client font - bundled from pfUI (fonts/Expressway.ttf,
-    -- MIT-licensed, see README), same reasoning as img/bar.tga.
+    -- Bundled (fonts/Expressway.ttf), not a stock client font - see README.
     { key = "expressway", label = "Expressway", path = "Interface\\AddOns\\CombatLedger\\fonts\\Expressway.ttf" },
 }
 
@@ -352,17 +280,10 @@ function CL.GetFontSize()
     return CL.GetSetting("fontSize") or 10
 end
 
--- Applies the current font CHOICE to any FontString - call at creation
--- and again from an appearance-changed listener (see below) so already-
--- created FontStrings pick up a change without a /reload.
---
--- `size` is optional - pass CL.GetFontSize() explicitly for bar text
--- (the one thing the "Font size" Options slider is meant to control).
--- Everywhere else, omit it: the font FAMILY should apply everywhere
--- (title bars, labels, Options controls, ...), but a title shouldn't
--- shrink down to bar-text size just because the family changed, so
--- this preserves whatever size the FontString already had (its
--- template's size, e.g. GameFontNormalLarge vs GameFontHighlightSmall).
+-- Applies the chosen font family to a FontString (at creation, and again
+-- from appearance-changed listeners). `size` is for bar text, which the
+-- "Font size" option controls; omit it elsewhere to keep the FontString's
+-- own template size.
 function CL.ApplyFont(fontString, size)
     if not fontString then return end
     if not size then
@@ -372,13 +293,9 @@ function CL.ApplyFont(fontString, size)
     fontString:SetFont(CL.GetFontPath(), size, "OUTLINE")
 end
 
--- Walks a frame and every descendant, applying the font CHOICE (native
--- size preserved, same as a bare CL.ApplyFont call) to every FontString
--- found - covers titles/headers/checkbox labels/stepper values/etc
--- without having to hand-instrument each one at creation time. Safe to
--- call on a whole window; a caller that wants specific elements (bar
--- text) at CL.GetFontSize() should call CL.ApplyFont on those AFTER
--- this, since this only ever preserves native size.
+-- Applies the font family (native sizes kept) to every FontString under
+-- a frame. Callers that want bar text at CL.GetFontSize() apply that
+-- afterwards.
 function CL.ApplyFontToTree(frame)
     if not frame then return end
     local regions = { frame:GetRegions() }
@@ -395,24 +312,14 @@ function CL.ApplyFontToTree(frame)
     end
 end
 
--- Bar height is per-window by default (each meter window has its own
--- sensible built-in constant) but Options can override all of them at
--- once - `default` is that window's own constant, used when no override
--- is set.
+-- The Options bar-height override, or the window's own `default`.
 function CL.GetBarHeight(default)
     return CL.GetSetting("barHeight") or default
 end
 
--- Vanilla's full strata order, lowest to highest. Used by
--- CL.NextLowerStrata below - a plain BACKGROUND constant for "one level
--- behind whatever window this is attached to" only worked back when
--- every CombatLedger window sat somewhere in the MEDIUM/DIALOG middle
--- of this list, where BACKGROUND really was several levels below all
--- of them. Once the main window moved to TOOLTIP (the top), a
--- BACKGROUND-strata shadow left a huge gap - literally every other
--- strata in between - for any other addon's frame to render on top of
--- it, instead of the shadow staying visually attached to its own
--- window like it does for everything else.
+-- Frame strata, lowest to highest. Shadows sit one tier below their
+-- window and dropdowns one tier above their anchor, so nothing from other
+-- addons can land in between.
 CL.STRATA_ORDER = { "BACKGROUND", "LOW", "MEDIUM", "HIGH", "DIALOG", "FULLSCREEN", "FULLSCREEN_DIALOG", "TOOLTIP" }
 
 function CL.NextLowerStrata(strata)
@@ -425,12 +332,7 @@ function CL.NextLowerStrata(strata)
     return "BACKGROUND" -- unrecognized input - safest fallback
 end
 
--- One tier above whatever strata is passed in - used by CL.ShowDropdown
--- so a submenu always renders just above whatever button opened it,
--- regardless of that button's own window's strata, instead of every
--- dropdown claiming the single topmost TOOLTIP tier unconditionally
--- (which used to outrank real Blizzard tooltips/frames for no reason
--- beyond "definitely on top").
+-- One tier above `strata` (used by CL.ShowDropdown).
 function CL.NextHigherStrata(strata)
     local i
     for i = 1, table.getn(CL.STRATA_ORDER) do
@@ -441,72 +343,43 @@ function CL.NextHigherStrata(strata)
     return "TOOLTIP" -- unrecognized input - safest fallback (definitely on top)
 end
 
--- Background alpha for every window's backdrop - only applied while
--- "Match pfUI" is off (pfUI's own skin governs backdrop appearance
--- otherwise, so this would have no visible effect and Options greys the
--- control out).
+-- Window background alpha; only used while "Match pfUI" is off.
 function CL.GetWindowOpacity()
     return (CL.GetSetting("windowOpacityPct") or 81) / 100
 end
 
--- `fallback` is a window's own original backdrop alpha, used while
--- "Match pfUI" is on (pfUI's skin governs the look then, so the manual
--- opacity setting would have no visible effect anyway).
+-- `fallback` is the window's own alpha, used while matching pfUI.
 function CL.GetBackdropAlpha(fallback)
     if CL.IsMatchPfui() then return fallback end
     return CL.GetWindowOpacity()
 end
 
--- Flat WHITE8X8 panel, matching pfUI's own default (non-"thin",
--- non-blizzard-forced) window backdrop exactly - same texture for both
--- background and edge (tinted separately via SetBackdropColor/
--- BackdropBorderColor), 1px edge, background inset -1px past the edge
--- so there's no gap between them. This used to be Blizzard's rounded
--- Tooltip border, a completely different look from pfUI's minimal
--- style - see CL.ApplyWindowSkin below for why that mattered.
+-- Flat 1px-edged panel matching pfUI's default window backdrop; colors
+-- are set separately with SetBackdropColor/SetBackdropBorderColor.
 CL.WINDOW_BACKDROP = {
     bgFile = "Interface\\BUTTONS\\WHITE8X8", tile = false, tileSize = 0,
     edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 1,
     insets = { left = -1, right = -1, top = -1, bottom = -1 },
 }
 
--- Soft drop shadow, matching pfUI's own backdrop_shadow - img/glow2.tga
--- is pfUI's actual shadow texture, bundled here the same way img/bar.tga
--- is (MIT-licensed, see README). 5px larger than the frame on every
--- side, same as pfUI's own anchor offsets.
+-- Soft drop shadow (bundled img/glow2.tga, pfUI's), drawn 5px outside
+-- the window on every side.
 CL.WINDOW_SHADOW = {
     edgeFile = "Interface\\AddOns\\CombatLedger\\img\\glow2", edgeSize = 8,
     insets = { left = 0, right = 0, top = 0, bottom = 0 },
 }
 
--- Near-black border/background - not a guess, this is one real pfUI
--- user's own actual tweaked appearance settings (border.color/
--- background from their pfUI SavedVariables), used here as the new
--- manual-skin default so the look doesn't require pfUI at all. Applies
--- everywhere the manual (non-"Match pfUI") skin renders a border -
--- window and buttons alike - rather than this addon's own theme/class
--- color, matching "Match pfUI"'s own existing rule that only text stays
--- class-colored, not chrome.
+-- Near-black border used by the manual skin for windows and buttons.
+-- Chrome stays neutral; only text is class-colored.
 CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B = 0.059, 0.059, 0.059
 
--- Applies pfUI's own skin to a window's backdrop when "Match pfUI" is on
--- (and pfUI is loaded), otherwise (re)applies this addon's own plain
--- backdrop at the chosen opacity - called both at window creation and
--- from the appearance-changed listener, so toggling the setting at
--- runtime actually changes the window's look instead of only whichever
--- one was true at creation time sticking forever. `borderR/G/B` is the
--- border color to use either way.
---
--- pfUI.api.CreateBackdrop does NOT skin `f` directly - it blanks f's own
--- backdrop (SetBackdrop(nil)) and parks its skin on a separate child
--- frame (f.backdrop, plus f.backdrop_shadow from CreateBackdropShadow),
--- and only creates that child once (later calls just reposition/re-skin
--- the existing one). Switching to manual mode has to explicitly Hide()
--- those children (they don't go away on their own) and restore f's own
--- backdrop; switching back to pfUI mode has to explicitly null f's own
--- backdrop again (CreateBackdrop only does that the very first time) -
--- otherwise toggling the setting either leaves an orphaned pfUI border/
--- shadow behind, or leaves our manual backdrop fighting with pfUI's.
+-- Skins a window with pfUI's backdrop while "Match pfUI" is on, otherwise
+-- with the manual flat backdrop. Called at creation and on every
+-- appearance change, so it must switch cleanly both ways: pfUI's
+-- CreateBackdrop puts its skin on child frames (f.backdrop,
+-- f.backdrop_shadow) and clears f's own backdrop only the first time, so
+-- manual mode hides those children and pfUI mode clears f's backdrop
+-- itself every time.
 function CL.ApplyWindowSkin(f, borderR, borderG, borderB, opacityFallback)
     if CL.IsMatchPfui() and pfUI.api then
         local ok = pcall(function()
@@ -516,9 +389,7 @@ function CL.ApplyWindowSkin(f, borderR, borderG, borderB, opacityFallback)
         if ok and f.backdrop then
             f:SetBackdrop(nil)
             f.backdrop:Show()
-            -- Deliberately NOT re-tinting the border to theme color here
-            -- - "Match pfUI" means look like pfUI, full stop; only text
-            -- (title, bar names, ...) stays class-colored.
+            -- Border left as pfUI draws it; only text is class-colored.
             if f.backdrop_shadow then f.backdrop_shadow:Show() end
             return
         end
@@ -527,29 +398,18 @@ function CL.ApplyWindowSkin(f, borderR, borderG, borderB, opacityFallback)
     if f.backdrop_shadow then f.backdrop_shadow:Hide() end
     f:SetBackdrop(CL.WINDOW_BACKDROP)
     f:SetBackdropColor(0, 0, 0, CL.GetBackdropAlpha(opacityFallback))
-    -- ShaguDPS-style borderless option - just the edge line goes
-    -- transparent, background/bars are unaffected. Independent of
-    -- matchPfui (only applies in this manual-skin branch; pfUI's own
-    -- skin bakes its border into one texture, not selectively hideable).
+    -- "Hide border" (manual skin only): the edge goes transparent.
     if CL.GetSetting("hideBorder") then
         f:SetBackdropBorderColor(0, 0, 0, 0)
     else
         f:SetBackdropBorderColor(CL.FLAT_BORDER_R, CL.FLAT_BORDER_G, CL.FLAT_BORDER_B, 1)
     end
 
-    -- Own shadow frame for the manual skin, same idea as pfUI's
-    -- backdrop_shadow child - created once, just re-shown/re-hidden
-    -- after that (same pattern as pfUI's f.backdrop above).
+    -- Manual-skin shadow: a child frame created once, then shown/hidden.
     if not CL.GetSetting("hideBorder") then
         if not f.flatShadow then
             f.flatShadow = CreateFrame("Frame", nil, f)
-            -- One strata below f's own (not a flat BACKGROUND constant -
-            -- see CL.NextLowerStrata's comment for why) so it reliably
-            -- sits just behind its own window regardless of frame level,
-            -- without leaving a gap other addons' frames can render into
-            -- when f itself is high up the strata order (e.g. a
-            -- dropdown submenu, dynamically strata'd via
-            -- CL.NextHigherStrata in ShowDropdown).
+            -- One tier below the window's own strata (see STRATA_ORDER).
             f.flatShadow:SetFrameStrata(CL.NextLowerStrata(f:GetFrameStrata()))
             f.flatShadow:SetFrameLevel(1)
             f.flatShadow:SetPoint("TOPLEFT", f, "TOPLEFT", -5, 5)
@@ -563,42 +423,10 @@ function CL.ApplyWindowSkin(f, borderR, borderG, borderB, opacityFallback)
     end
 end
 
--- Skins a small manually-built button (CreateHeaderButton-style: own
--- backdrop already set, hover/tooltip already wired via SetScript
--- before this runs) with pfUI's look while Match pfUI is on, otherwise
--- just asserts the theme border color. Unlike CreateBackdrop, pfUI's
--- SkinButton sets the backdrop directly on the button itself (no child
--- frame), so there's no orphaned-frame cleanup needed here.
---
--- "Match pfUI" means look like pfUI, full stop - the base backdrop/
--- border color at rest comes from pfUI's own skin (not re-tinted to
--- theme). Hover is a different story: SkinButton's disableHighlight
--- arg is passed true here so pfUI's own OnEnter/OnLeave hover hook
--- (pfUI.api.SetHighlight) never gets installed on these buttons at all
--- - it's a second, independent hover mechanism built on the same raw
--- OnEnter/OnLeave events we already found unreliable on this client
--- (see SetButtonTooltip's own OnUpdate-poll rewrite), and since it
--- fights over the exact same backdrop border, leaving it enabled meant
--- the click/hover-stuck bug kept happening via pfUI's own hook even
--- after our side was fixed. SetButtonTooltip's OnUpdate poll owns hover
--- unconditionally now instead, including while matching pfUI.
---
--- The manual-skin branch below uses the near-black FLAT_BORDER_* by
--- default (consistent flat look, not theme-colored chrome mixed with a
--- neutral window border) - unless "Show class colored menus" is on,
--- which brings back the passed-in borderR/G/B (the player's class
--- color, from CL.GetThemeColor) instead. Off by default; some people
--- want the buttons to pick up their class color, others find it
--- clashes with the flat neutral window.
--- The fill/backdrop color a CreateHeaderButton-style button should show
--- at rest right now - pfUI's own configured border-background while
--- matching pfUI (same color CreateBackdrop's legacy branch just used
--- inside SkinButton above), otherwise the flat default. Shared with
--- UI_MainWindow.lua's SetButtonTooltip, whose OnUpdate re-asserts this
--- EVERY frame rather than only on mouse-up/a press timeout - a hardcoded
--- near-black revert used to fight with pfUI's real (different) color
--- whenever Match pfUI was on, leaving a clicked button stuck showing
--- the wrong tone against its never-yet-clicked neighbors.
+-- A header button's resting fill color: pfUI's configured background
+-- while matching pfUI, otherwise the flat default. UI_MainWindow's
+-- SetButtonTooltip re-asserts it every frame, so it must match whatever
+-- skin is active.
 function CL.GetButtonNormalFill()
     if CL.IsMatchPfui() and pfUI.api and pfUI.api.GetStringColor and pfUI_config then
         local ok, r, g, b, a = pcall(pfUI.api.GetStringColor, pfUI_config.appearance.border.background)
@@ -613,10 +441,7 @@ function CL.ApplyButtonSkin(btn, borderR, borderG, borderB)
         local ok = pcall(pfUI.api.SkinButton, btn, nil, nil, nil, nil, true)
         matchedPfui = ok
     end
-    -- classColorMenus is an explicit opt-in override - it wins even over
-    -- pfUI's own skin border, otherwise it has zero visible effect for
-    -- anyone running with "Match pfUI" on (the default), since SkinButton
-    -- above would already have claimed the border first.
+    -- "Class colored menus" overrides the border in either skin.
     if CL.GetSetting("classColorMenus") then
         btn:SetBackdropBorderColor(borderR, borderG, borderB, 1)
     elseif not matchedPfui then
@@ -624,13 +449,10 @@ function CL.ApplyButtonSkin(btn, borderR, borderG, borderB)
     end
 end
 
--- Lightweight click-menu, shared by anything that needs a real dropdown
--- (the main meter's Mode/Segment buttons, Options' Bar texture/Font/
--- Number format pickers) - a plain frame + pooled row buttons rather
--- than Blizzard's UIDropDownMenu, which is finicky to reuse outside its
--- own templates on this client. Only one can be open at a time
--- regardless of which button opened it, so this lives here once instead
--- of every window that wants one building its own copy.
+-- Shared click-menu (the meter's Mode/Segment buttons, Options pickers):
+-- a plain frame with pooled rows instead of UIDropDownMenu. One can be
+-- open at a time; an invisible full-screen catcher closes it on an
+-- outside click.
 local dropdownFrame = nil
 local dropdownCatcher = nil -- full-screen invisible button that closes the menu on an outside click
 
@@ -651,9 +473,7 @@ function CL.ShowDropdown(anchor, options)
     end
     if not dropdownFrame then
         dropdownFrame = CreateFrame("Frame", nil, UIParent)
-        -- Frame LEVEL (not strata - see below) one above the catcher,
-        -- so the actual clickable rows win same-strata stacking order
-        -- against the full-screen catcher sitting right underneath them.
+        -- Same strata as the catcher, one level above it.
         dropdownFrame:SetFrameLevel(2)
         dropdownFrame:SetBackdrop(CL.WINDOW_BACKDROP)
         dropdownFrame:SetBackdropColor(0.05, 0.05, 0.05, 0.97)
@@ -661,11 +481,7 @@ function CL.ShowDropdown(anchor, options)
         dropdownFrame.rows = {}
     end
 
-    -- Strata is recomputed on every open, one tier above whatever
-    -- opened it right now (anchor's OWN current strata, not a fixed
-    -- constant) - a submenu just needs to beat its own anchor, not
-    -- unconditionally outrank every other addon's UI by sitting at the
-    -- single topmost TOOLTIP tier regardless of context.
+    -- One tier above the anchor's current strata, recomputed per open.
     local dropStrata = CL.NextHigherStrata(anchor:GetFrameStrata())
     dropdownCatcher:SetFrameStrata(dropStrata)
     dropdownFrame:SetFrameStrata(dropStrata)
@@ -679,10 +495,7 @@ function CL.ShowDropdown(anchor, options)
     dropdownFrame:SetWidth(width)
     dropdownFrame:SetHeight(height)
     dropdownFrame:ClearAllPoints()
-    -- Opens upward instead when there isn't room below the anchor to
-    -- fit without running off the bottom of the screen - meter windows
-    -- commonly sit low on screen (a corner HUD), where a downward
-    -- dropdown routinely got clipped/ran past the screen edge.
+    -- Opens upward when there's no room below the anchor.
     local anchorBottom = anchor:GetBottom() or 0
     if anchorBottom - height < 10 then
         dropdownFrame:SetPoint("BOTTOM", anchor, "TOP", 0, 2)
@@ -713,10 +526,7 @@ function CL.ShowDropdown(anchor, options)
         row:SetPoint("TOPLEFT", dropdownFrame, "TOPLEFT", 3, -3 - (i - 1) * ROW_H)
         row:SetPoint("TOPRIGHT", dropdownFrame, "TOPRIGHT", -3, -3 - (i - 1) * ROW_H)
         row.text:SetText(options[i].label)
-        -- Optional per-row color (e.g. Current/Overall in class color, to
-        -- stand out from the plain-white History entries below them) -
-        -- rows are pooled/reused, so reset to plain white when a row
-        -- doesn't specify one rather than leaking a previous row's color.
+        -- Rows are pooled, so every row sets its color (white by default).
         local color = options[i].color
         if color then
             row.text:SetTextColor(color[1], color[2], color[3])
@@ -748,10 +558,8 @@ function CL.GetBarSpeed()
     return CL.GetSetting("barSpeed") or 8
 end
 
--- Repositions a pooled bar list (StatusBar frames anchored TOPLEFT/
--- TOPRIGHT to their own parent, stacked by index - the pattern every
--- bar pool in this addon uses) after a bar-height change, since each
--- bar's Y offset was computed from the height at creation time.
+-- Re-stacks a pooled bar list after a bar-height change (each bar's Y
+-- offset depends on the height).
 function CL.RepositionBarPool(pool, height, gap)
     local i
     for i = 1, table.getn(pool) do
@@ -763,9 +571,7 @@ function CL.RepositionBarPool(pool, height, gap)
     end
 end
 
--- Number formatting - shared so every window's numbers change together
--- from one Options setting instead of each having its own baked-in
--- k/m-abbreviation logic.
+-- Number formatting, shared by every window (Options: Number format).
 CL.NUMBER_FORMATS = {
     { key = "abbreviated", label = "Abbreviated (1.2k)" },
     { key = "full", label = "Full (1,234)" },
@@ -782,9 +588,7 @@ local function AddCommas(numStr)
     return formatted
 end
 
--- "253 DPS" instead of "253/s" - mode-aware (HPS for healing, DTPS for
--- damage taken) rather than blindly always saying DPS, since that would
--- be wrong while looking at Healing Done.
+-- Rate unit label per mode ("DPS", "HPS", "DTPS"; "/s" otherwise).
 CL.RATE_SUFFIXES = { damage = "DPS", healing = "HPS", taken = "DTPS" }
 
 function CL.RateSuffix(mode)
@@ -808,10 +612,10 @@ function CL.FormatNumber(n)
     return tostring(math.floor(n))
 end
 
--- Overheal/unverified lines for any healing bucket or spell entry
--- (see Aggregator.lua's AddHeal), shared by the main tooltip and the
--- breakdown panel. addLine(label, value, dim). Saves from before
--- overheal tracking have no `raw` and show nothing.
+-- Overheal/unverified lines for any healing bucket or spell entry (see
+-- Aggregator.lua's AddHeal), shared by the main tooltip and the breakdown
+-- panel. addLine(label, value, dim). Entries without `raw` (saved before
+-- overheal tracking) show nothing.
 function CL.AddOverhealLines(t, addLine)
     local raw = t and t.raw
     if not raw or raw <= 0 then return end
@@ -876,10 +680,8 @@ function CL.AddMitigationLines(t, meleeHits, addLine)
     Count("Crushing", "crushing")
 end
 
--- Appearance-changed pub/sub - each UI file registers a listener that
--- re-applies font/texture/bar-height/number-format to its own pooled
--- bars; Options fires this once after any change so every open window
--- updates immediately instead of needing a /reload.
+-- Appearance-changed notifications: each UI file registers a listener
+-- that re-applies fonts/textures/sizes; Options fires it after a change.
 CL.appearanceListeners = {}
 
 function CL.OnAppearanceChanged(fn)
@@ -896,17 +698,11 @@ function CL.FireAppearanceChanged()
     end
 end
 
--- Generic icon for melee entries (Auto Attack/Off-Hand have no spellId
--- to look an icon up from).
+-- Icon for melee rows, which have no spellId to look an icon up from.
 CL.MELEE_ICON = "Interface\\Icons\\Ability_MeleeDamage"
 
--- Texture coordinates for Interface\TargetingFrame\UI-Classes-Circle's
--- 4x3 class grid - a real Blizzard global (CLASS_ICON_TCOORDS) on most
--- client builds, but not guaranteed without pfUI's own fallback
--- definition of it, so this addon keeps its own copy rather than
--- depending on pfUI being installed. Standard, unchanging vanilla
--- values - no Death Knight/Monk/Demon Hunter/Evoker, those classes
--- don't exist yet.
+-- Class icon atlas coordinates (img/classicons.tga, 4x3 grid). Kept
+-- locally since CLASS_ICON_TCOORDS isn't guaranteed on this client.
 CL.CLASS_ICON_TCOORDS = {
     WARRIOR = { 0, 0.25, 0, 0.25 },
     MAGE = { 0.25, 0.49609375, 0, 0.25 },
@@ -919,11 +715,8 @@ CL.CLASS_ICON_TCOORDS = {
     PALADIN = { 0, 0.25, 0.5, 0.75 },
 }
 
--- spellId -> icon texture path. GetSpellRecField's "spellIconID" field
--- gives a numeric icon id, which GetSpellIconTexture resolves to a real
--- texture path - covers any spellId seen in combat, not just ones in
--- the player's own spellbook (GetSpellTexture only works for that,
--- useless for other units' abilities).
+-- spellId -> icon texture via the spell DBC, so it works for any spell
+-- seen in combat, not only the player's own spellbook.
 function CL.GetSpellIcon(spellId)
     if not spellId then return nil end
     if type(GetSpellRecField) ~= "function" or type(GetSpellIconTexture) ~= "function" then return nil end
@@ -937,16 +730,12 @@ function CL.GetSpellIcon(spellId)
 end
 
 
--- WoW's own epic-quality purple hex, used for visual consistency with
--- the author's other addons.
+-- Addon accent color (epic purple).
 CL.ACCENT_HEX = "a335ee"
 CL.ACCENT_R, CL.ACCENT_G, CL.ACCENT_B = 0.64, 0.21, 0.93
 
--- Window chrome (borders, buttons, non-unit-specific titles) themes
--- itself to the player's own class color rather than the fixed purple
--- accent above - per-unit content (bars, breakdown/recap titles) still
--- colors by whichever unit it's showing, which is a different, correct
--- thing. Falls back to the purple accent if class lookup ever fails.
+-- Theme color for window chrome and titles: the player's class color,
+-- or the accent if that can't be read. Returns r, g, b, hex.
 function CL.GetThemeColor()
     local ok, _, classToken = pcall(UnitClass, "player")
     if ok and classToken and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classToken] then
@@ -956,10 +745,8 @@ function CL.GetThemeColor()
     return CL.ACCENT_R, CL.ACCENT_G, CL.ACCENT_B, CL.ACCENT_HEX
 end
 
--- "auto" resolves to whichever of these the player is actually in
--- (raid > party), falling back to Say if solo - chosen at announce time,
--- not stored, since group status can change between one announce and
--- the next.
+-- Announce channels. "auto" resolves at announce time: raid, else
+-- party, else say.
 CL.ANNOUNCE_CHANNELS = {
     { key = "auto", label = "Auto (raid/party)" },
     { key = "say", label = "Say" },
@@ -986,39 +773,55 @@ function CL.Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cff" .. CL.ACCENT_HEX .. "CombatLedger:|r " .. msg)
 end
 
--- Debug event/aggregation logging, off by default - toggle with /cl
--- debug when troubleshooting. Goes to a file (LogLine/FlushLog), not
--- chat - see the file-header note.
+--------------------------------------------------------------------------
+-- Diagnostics (shown by /cl status)
+--
+-- Event handlers and OnUpdate ticks run under pcall and report failures
+-- here instead of letting one bad event break a handler for the session.
+-- Each error tag is announced in chat once; repeats are only counted.
+--------------------------------------------------------------------------
+
+CL.Diagnostics = {
+    eventCounts = {}, -- [eventName] = times received this session
+    errorCounts = {}, -- [tag] = errors caught this session
+    lastErrors = {},  -- [tag] = most recent error message
+}
+
+function CL.CountEvent(name)
+    local counts = CL.Diagnostics.eventCounts
+    counts[name] = (counts[name] or 0) + 1
+end
+
+function CL.RecordError(tag, err)
+    tag = tostring(tag)
+    local d = CL.Diagnostics
+    local first = d.errorCounts[tag] == nil
+    d.errorCounts[tag] = (d.errorCounts[tag] or 0) + 1
+    d.lastErrors[tag] = tostring(err)
+    if first then
+        CL.Print("|cffff4040error|r in " .. tag .. ": " .. tostring(err) .. " (further ones are counted in /cl status)")
+    end
+    if CL.debug then CL.LogLine("[ERROR] " .. tag .. ": " .. tostring(err)) end
+end
+
+-- Debug logging to CL.LOG_FILENAME (/cl debug). Off by default.
 CL.debug = false
 
--- Restoring CL.debug from CombatLedgerDB.settings.debug (persisted by
--- /cl debug - see Events.lua) so it's already on by the time
--- PLAYER_ENTERING_WORLD fires on the NEXT login - that event fires
--- before there's ever a chance to type /cl debug fresh each session,
--- which made login-time behavior (e.g. Threat.lua's version handshake)
--- structurally impossible to capture otherwise. Can't just read
--- CombatLedgerDB.settings.debug here at top-level like the line above -
--- this client restores SavedVariables from disk AFTER this file's own
--- init runs (see EnsureSettingsTable's comment below), so a synchronous
--- read here would always see the pre-restore default, never the real
--- saved value. Registered directly in Core.lua (the first file loaded,
--- per the .toc) specifically so this fires BEFORE any other file's own
--- PLAYER_ENTERING_WORLD handler that might check CL.debug on the same
--- event - Threat.lua in particular loads earlier than Events.lua and
--- fires on this same event too.
+-- The persisted debug flag is restored on PLAYER_ENTERING_WORLD
+-- (SavedVariables aren't loaded yet when this file runs). Core loads
+-- first, so this handler runs before any other file's handler for the
+-- same event and debug output covers login too.
 local debugRestoreFrame = CreateFrame("Frame")
 debugRestoreFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 debugRestoreFrame:SetScript("OnEvent", function()
     CL.debug = (CombatLedgerDB.settings.debug == true)
 end)
 
--- Session-only (not saved) - fills every meter window with fabricated
--- data so appearance settings can be previewed without needing to
--- actually fight something. See Aggregator.lua's GetTestEncounter and
--- UI_Options.lua's toggle.
+-- Test mode (session only): windows show fabricated data for previewing
+-- appearance (Aggregator.GetTestEncounter).
 CL.testMode = false
 
--- table.getn/pairs-based count - Lua 5.0 has no # operator.
+-- Number of keys in any table (table.getn only counts the array part).
 function CL.TableCount(t)
     local n = 0
     local _
@@ -1026,32 +829,24 @@ function CL.TableCount(t)
     return n
 end
 
--- Lua 5.0 has no bitwise operators (and no guaranteed `bit` library on
--- this client) - checks whether a single power-of-two bit is set in
--- value by hand: floor(value/bit) mod 2 == 1. `bit` must itself be a
--- power of two (128, 16384, ...), not a combined mask.
+-- Is the single power-of-two `bit` set in `value`? Lua 5.0 has no
+-- bitwise operators, so this is floor(value / bit) mod 2 == 1.
 function CL.HasBit(value, bit)
     if not value then return false end
     return math.mod(math.floor(value / bit), 2) == 1
 end
 
--- AUTO_ATTACK_SELF/OTHER's hitInfo and SPELL_DAMAGE_EVENT_SELF/OTHER's
--- hitInfo are different bitfields, not the same convention reused -
--- 0x02 means "normal swing landed" (present on every auto-attack hit)
--- for the former, but means "critical hit" for the latter. The
--- auto-attack side matches the well-known MaNGOS/TrinityCore HITINFO_*
--- enum.
+-- hitInfo bits. AUTO_ATTACK_* and SPELL_DAMAGE_EVENT_* use different
+-- bitfields: on auto-attacks (the MaNGOS HITINFO_* enum) 0x02 is set on
+-- every landed swing, on spell damage 0x02 means crit.
 CL.AUTO_ATTACK_HITFLAG_CRIT = 128
 CL.AUTO_ATTACK_HITFLAG_GLANCING = 16384
 CL.AUTO_ATTACK_HITFLAG_CRUSHING = 32768
 CL.AUTO_ATTACK_HITFLAG_OFFHAND = 4
 CL.SPELL_DAMAGE_HITFLAG_CRIT = 2
 
--- dodge/parry/miss on this server do not arrive as separate
--- SPELL_MISS_* events - they arrive as a dmg=0 AUTO_ATTACK with one of
--- these victimState values instead. block/evade/immune/deflect are the
--- standard MaNGOS-family VICTIMSTATE_* values, kept here for forward
--- compatibility rather than folding them into "other".
+-- AUTO_ATTACK victimState values (MaNGOS VICTIMSTATE_*). An avoided
+-- swing arrives as a 0-damage AUTO_ATTACK with one of these.
 CL.VICTIMSTATE_MISS = 0
 CL.VICTIMSTATE_NORMAL = 1
 CL.VICTIMSTATE_DODGE = 2
@@ -1071,18 +866,20 @@ CL.LOG_FILENAME = "CombatLedger_debug.log"
 local logBuffer = {}
 local loggedThisSession = false -- first flush of a session overwrites (fresh file per test), later ones append
 
--- LogLine buffers rather than writing immediately - combat events can
--- fire many times a second, and a WriteCustomFile call per line would be
--- a lot of disk I/O during a real fight. FlushLog (called periodically
--- from Events.lua's OnUpdate, and on the grace-window encounter-end)
--- batches the buffer into one write.
+-- LogLine only buffers; FlushLog (once a second from Events.lua, and at
+-- encounter end) writes the batch, so combat doesn't cost a file write
+-- per event. The first flush of a session overwrites the file.
 function CL.LogLine(line)
     table.insert(logBuffer, line)
 end
 
 function CL.FlushLog()
     if table.getn(logBuffer) == 0 then return end
-    if not WriteCustomFile then return end
+    if not WriteCustomFile then
+        -- Nothing can ever write it out - don't let it grow forever.
+        logBuffer = {}
+        return
+    end
 
     local content = table.concat(logBuffer, "\n") .. "\n"
     local mode = loggedThisSession and "a" or "w"
@@ -1091,6 +888,5 @@ function CL.FlushLog()
         loggedThisSession = true
         logBuffer = {}
     end
-    -- on failure, leave the buffer intact and retry on the next flush
-    -- rather than silently dropping data
+    -- On failure the buffer is kept and retried on the next flush.
 end

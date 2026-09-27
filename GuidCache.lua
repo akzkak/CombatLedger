@@ -1,38 +1,32 @@
 --[[
-    GuidCache - resolves a raw GUID (as combat events give us) to a
-    name/class/level, independent of whether that unit currently occupies
-    a live unit token. In vanilla, a GUID from a combat event is normally
-    a dead end unless the unit is targeted right then, which is why most
-    vanilla meters fall back to parsing chat text (the server already
-    bakes the name into the string).
+    GuidCache - identity and roster scope for the GUIDs combat events carry.
 
-    GetUnitData(guid) returns none of name/class/type - only internal
-    engine data (health, power, byte-packed race/class in bytes0/bytes2,
-    stats, auras) - so it can't be used to resolve identity. This
-    client's SuperWoW lets a raw GUID stand in for a normal unit token
-    instead, so UnitName(guid)/UnitClass(guid)/UnitIsPlayer(guid) resolve
-    it directly. GetUnitData is kept only for the numeric field it does
-    have (level).
+    Resolve(guid) -> { name, class, classToken, isPlayer, lastSeen } or nil.
+    SuperWoW lets a raw GUID stand in for a unit token, so UnitName/
+    UnitClass/UnitIsPlayer answer for any unit the client currently knows,
+    targeted or not. A GUID the client can't resolve yet returns nil and is
+    retried on the next call rather than cached as unknown.
+
+    Roster scope: IsTracked(guid) is true for the player, party/raid members
+    and their pets - "us". Nampower's *_OTHER events cover everyone nearby,
+    so Events.lua only records an event when at least one side is tracked.
+    GetOwner(petGuid) maps a pet to its owner for pet merging.
 ]]
 
 local CL = CombatLedger
 
--- [guid] = { name, class, classToken, isPlayer, level, lastSeen }
+local ZERO_GUID = "0x0000000000000000"
+
+-- [guid] = { name, class, classToken, isPlayer, lastSeen }. Entries idle
+-- for STALE_TIMEOUT are evicted by CleanupStale (Events.lua calls it
+-- periodically) and the whole cache is purged on every loading screen.
+-- Recorded data copies the name at creation time, so eviction never
+-- loses anything already shown.
 local cache = {}
-local STALE_TIMEOUT = 300 -- seconds a cache entry is kept before eviction
-
-local dumpedOnce = false
-
-local function DumpFields(guid, data)
-    CL.LogLine("GetUnitData(" .. tostring(guid) .. ") raw fields:")
-    local k, v
-    for k, v in pairs(data) do
-        CL.LogLine("  " .. tostring(k) .. " = " .. tostring(v))
-    end
-end
+local STALE_TIMEOUT = 300
 
 local function Resolve(guid)
-    if not guid or guid == "" or guid == "0x0000000000000000" then return nil end
+    if not guid or guid == "" or guid == ZERO_GUID then return nil end
 
     local entry = cache[guid]
     if entry then
@@ -40,16 +34,14 @@ local function Resolve(guid)
         return entry
     end
 
-    -- pcall-guarded: on this client, UnitName(guid) doesn't just return
-    -- nil for a guid string it can't resolve to a live unit - it can
-    -- hard-error ("Unknown unit name: ...") instead, which would
-    -- otherwise take down whatever combat event triggered this Resolve.
+    -- UnitName(guid) raises ("Unknown unit name") rather than returning
+    -- nil for a GUID the client can't place, so every lookup is guarded.
     local name
     if UnitName then
         local ok, result = pcall(UnitName, guid)
         if ok then name = result end
     end
-    if not name or name == "" then return nil end -- unit not currently resolvable; retry next time
+    if not name or name == "" then return nil end
 
     local isPlayer = UnitIsPlayer and UnitIsPlayer(guid)
 
@@ -61,24 +53,11 @@ local function Resolve(guid)
         end
     end
 
-    local level
-    if GetUnitData then
-        local ok, data = pcall(GetUnitData, guid)
-        if ok and data then
-            level = data.level
-            if CL.debug and not dumpedOnce then
-                dumpedOnce = true
-                DumpFields(guid, data)
-            end
-        end
-    end
-
     entry = {
         name = name,
         class = class,
         classToken = classToken,
         isPlayer = isPlayer,
-        level = level,
         lastSeen = GetTime(),
     }
     cache[guid] = entry
@@ -87,7 +66,6 @@ end
 
 local function Purge()
     cache = {}
-    dumpedOnce = false
 end
 
 local function CleanupStale()
@@ -106,22 +84,14 @@ local function CleanupStale()
 end
 
 --------------------------------------------------------------------------
--- Roster scope - which GUIDs are "ours" (player, party/raid, their pets).
--- Nampower's *_OTHER combat events aren't scoped to your group by
--- themselves - without this, a random unrelated player fighting a
--- different mob nearby would show up as if they were part of the fight.
--- Events.lua only records an event if at least one side (source or
--- target) is in this set.
+-- Roster scope
 --------------------------------------------------------------------------
 
-local tracked = {}
-local petOwner = {} -- [petGuid] = ownerGuid, so a pet's damage/healing can roll up under its owner's bar
+local tracked = {}  -- [guid] = true for player/party/raid members and their pets
+local petOwner = {} -- [petGuid] = ownerGuid
 
--- pcall-wrapped: a malformed unit token string can throw, and a hard
--- error out of RefreshRoster would leave `tracked` half-built for the
--- rest of the fight rather than just skipping one bad token. ownerUnit,
--- when given, records this unit's GUID as owned by ownerUnit's GUID
--- (pets only).
+-- Guarded so one bad token can't abort a rebuild halfway and leave the
+-- roster partial. ownerUnit (pets only) records the pet -> owner link.
 local function AddUnit(unit, ownerUnit)
     local ok, exists, guid = pcall(UnitExists, unit)
     if ok and exists and guid then
@@ -135,6 +105,7 @@ local function AddUnit(unit, ownerUnit)
     end
 end
 
+-- Rebuilt from scratch on roster/pet changes (see Events.lua).
 local function RefreshRoster()
     tracked = {}
     petOwner = {}
@@ -145,9 +116,8 @@ local function RefreshRoster()
         local i
         for i = 1, 40 do
             AddUnit("raid" .. i)
-            -- Nampower's extended raid pet tokens use a "<base>pet"
-            -- suffix ("raid5pet"), unlike party's native "partypetN"
-            -- prefix convention - easy to mix up.
+            -- Raid pet tokens are "raidNpet" (suffix), unlike party's
+            -- "partypetN" (prefix).
             AddUnit("raid" .. i .. "pet", "raid" .. i)
         end
     elseif GetNumPartyMembers and GetNumPartyMembers() > 0 then
@@ -169,19 +139,23 @@ local function GetOwner(guid)
     return petOwner[guid]
 end
 
+--------------------------------------------------------------------------
+-- Combat state
+--------------------------------------------------------------------------
+
 local function UnitInCombat(unit)
     local ok, inCombat = pcall(UnitAffectingCombat, unit)
     return ok and inCombat and true or false
 end
 
--- Is any group member or tracked pet flagged in combat? (In a raid the
--- player's own raidN slot is included - harmless, callers only ask
--- once the player is known to be out of combat or don't care.)
--- Both raid and party ranges are scanned when nonzero - on this client
--- GetNumPartyMembers() can be nonzero while in a raid. Pets count: a
--- Feign Death hunter's pet keeps fighting. Cached briefly since heal/
--- dispel lazy-start (Aggregator.lua) can ask on every event, and a raid
--- scan is up to 80 unit checks.
+-- True if any group member or pet is flagged in combat (in a raid this
+-- includes the player's own raid slot; callers either already know the
+-- player is out of combat or don't mind). Raid and party ranges are both
+-- scanned when nonzero: GetNumPartyMembers() can be nonzero inside a raid
+-- on this client. Pets count, so a Feign Death hunter's fighting pet
+-- keeps the group "in combat". Cached for GROUP_COMBAT_CACHE_SECONDS
+-- because heal/dispel lazy-start (Aggregator.lua) may ask on every event
+-- and a raid scan is up to 80 unit checks.
 local GROUP_COMBAT_CACHE_SECONDS = 0.25
 local groupCombatCheckedAt = nil
 local groupCombatCached = false

@@ -27,13 +27,10 @@ local function CharKey()
     return name .. "-" .. realm
 end
 
--- Returns the current character's own encounter list, creating it if
--- needed. Also does a one-time migration of the OLD account-wide flat
--- list (CombatLedgerDB.encounters, from before per-character history)
--- into whichever character happens to log in first after the update -
--- nobody silently loses their existing saved encounters, but it's
--- cleared immediately after so a second alt logging in doesn't also
--- re-import the same old shared list into its own bucket.
+-- Returns this character's history key, creating its list if needed.
+-- A legacy account-wide list (CombatLedgerDB.encounters) is moved into
+-- the first character that logs in, then removed so no other character
+-- imports it again.
 local function EnsureEncountersTable()
     if not CombatLedgerDB.encountersByChar then
         CombatLedgerDB.encountersByChar = {}

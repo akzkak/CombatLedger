@@ -1,10 +1,16 @@
 --[[
-    Events - enables the Nampower CVars the combat events are gated
-    behind (default off), registers them, and dispatches into the
-    Aggregator. With CL.debug on, every raw event logs its full argument
-    list to CL.LOG_FILENAME (via CL.LogLine/FlushLog in Core.lua). Chat
-    stays quiet (just load/encounter start-stop) since real combat event
-    volume would make chat unreadable.
+    Events - the event pipeline. Enables the Nampower CVars the combat
+    events are gated behind, decodes each event's arguments and hands the
+    result to the Aggregator; also owns encounter start/end timing and the
+    /cl slash command.
+
+    Every event and OnUpdate tick runs under pcall: an error is counted
+    and reported once per event name (CL.RecordError, see /cl status)
+    instead of breaking the handler for the rest of the session.
+
+    With CL.debug on, every event logs its decoded arguments to
+    CL.LOG_FILENAME (Core.lua's LogLine/FlushLog); "[FILTERED]" marks
+    events that were seen but not recorded.
 ]]
 
 local CL = CombatLedger
@@ -15,11 +21,8 @@ local cvarsToEnable = {
     "NP_EnableSpellGoEvents",
     "NP_EnableSpellHealEvents",
     "NP_EnableSpellEnergizeEvents",
-    -- SPELL_DISPEL_BY_SELF/OTHER needs no CVar per Nampower's changelog.
-    -- AURA_CAST_ON_SELF/OTHER is needed for the debuffs-given correlation
-    -- (see HandleAuraCast/HandleDebuffAdded below). BUFF/DEBUFF_ADDED_*
-    -- need no CVar per Nampower's changelog.
-    "NP_EnableAuraCastEvents",
+    "NP_EnableAuraCastEvents", -- AURA_CAST_ON_*, for the debuffs-given correlation below
+    -- SPELL_DISPEL_* and BUFF/DEBUFF_ADDED_* need no CVar.
 }
 local function EnableCVars()
     local i
@@ -28,11 +31,9 @@ local function EnableCVars()
     end
 end
 
--- Best-effort spell name lookup for the breakdown UI - wrapped since
--- GetSpellRecField's behavior isn't guaranteed for every spellId, and a
--- failure here shouldn't break event handling. Cached per spellId (a
--- DBC name never changes) since this runs on nearly every combat event;
--- false marks a lookup that failed, so it isn't retried every hit.
+-- Spell name from the DBC, cached per spellId since it runs on nearly
+-- every event and never changes. false caches a failed lookup so it
+-- isn't retried every hit.
 local spellNameCache = {}
 local function SpellName(spellId)
     if not spellId or not GetSpellRecField then return nil end
@@ -45,34 +46,28 @@ local function SpellName(spellId)
     return cached or nil
 end
 
--- Nampower's *_OTHER events aren't scoped to your group - without this,
--- a random unrelated player fighting a different mob nearby would get
--- recorded as if they were part of the fight. Only record when at least
--- one side is player/party/raid/pet (see GuidCache's roster tracking);
--- the other side is free to be any mob/player, so "you hit a mob" and
--- "a mob hits you" both pass, but "stranger hits unrelated mob" doesn't.
+-- Nampower's *_OTHER events cover everyone nearby. An event is ours when
+-- at least one side is the player, a group member or a pet (GuidCache's
+-- roster): "we hit a mob" and "a mob hit us" pass, "a stranger hit an
+-- unrelated mob" doesn't.
 local function IsRelevant(guidA, guidB)
     if not CL.GuidCache then return false end
     return CL.GuidCache.IsTracked(guidA) or CL.GuidCache.IsTracked(guidB)
 end
 
--- Declared here (not down near FinishEncounter, where the idle-trim
--- logic that reads lastEventTime lives) so the Handle* functions below
--- can call it - Lua resolves an identifier at compile time based on
--- what's lexically in scope ABOVE it in the file, so a local declared
--- later is invisible to code above it and would silently resolve to a
--- nonexistent global instead.
+-- Time of the last relevant combat event. Drives the idle-timeout
+-- fallback and trims trailing idle time off a finished encounter's
+-- duration (Aggregator.EndEncounter). Only relevant events touch it -
+-- nearby strangers' combat must not keep a finished fight "active".
 local lastEventTime = 0
 local function TouchActivity()
     lastEventTime = GetTime()
 end
 
--- Mitigation for the event being handled, passed to Aggregator.
--- RecordDamage/RecordAvoidance (see Aggregator.lua's ApplyMitigation).
--- One reused scratch table rather than a new one per event - Record*
--- reads it synchronously and never keeps a reference. FillMitigation
--- returns nil when nothing was mitigated, so the common case costs
--- nothing downstream.
+-- Mitigation observed on the event being handled, handed to
+-- Aggregator.RecordDamage/RecordAvoidance (see ApplyMitigation there).
+-- One reused scratch table: Record* reads it synchronously and never
+-- keeps a reference. Returns nil when nothing was mitigated.
 local mitScratch = {}
 local function FillMitigation(absorbed, blocked, resisted, glancing, crushing)
     absorbed = tonumber(absorbed) or 0
@@ -89,20 +84,14 @@ local function FillMitigation(absorbed, blocked, resisted, glancing, crushing)
     return mitScratch
 end
 
+-- AUTO_ATTACK_SELF/OTHER: attacker, target, totalDamage, hitInfo,
+-- victimState, subDamageCount, blocked, absorbed, resisted. totalDamage
+-- is already net of absorb/block/resist. A 0-damage swing was avoided
+-- (victimState says how); off-hand swings carry hitInfo's 0x04 bit.
 local function HandleAutoAttack(isSelf, attackerGuid, targetGuid, totalDamage, hitInfo, victimState, componentCount, blocked, absorbed, resisted)
     totalDamage = tonumber(totalDamage) or 0
     hitInfo = tonumber(hitInfo)
     local relevant = IsRelevant(attackerGuid, targetGuid)
-    -- Only touches activity for OUR OWN combat, not every hit anyone
-    -- nearby lands - TouchActivity() used to be called unconditionally
-    -- by the dispatcher before relevance was even known, so a busy area
-    -- (other players fighting other things nearby) kept lastEventTime
-    -- constantly fresh regardless of whether the PLAYER was still doing
-    -- anything. That silently defeated both the idle-timeout fallback
-    -- and EndEncounter's trailing-idle-time trim (see Aggregator.lua) -
-    -- confirmed via debug log: dense [FILTERED] combat noise from other
-    -- players kept a finished fight's reported duration inflated by
-    -- however long that noise kept going after the real fight ended.
     if relevant then TouchActivity() end
     if CL.debug then
         CL.LogLine(string.format(
@@ -113,8 +102,6 @@ local function HandleAutoAttack(isSelf, attackerGuid, targetGuid, totalDamage, h
     end
     if not relevant then return end
     local isOffhand = CL.HasBit(hitInfo, CL.AUTO_ATTACK_HITFLAG_OFFHAND)
-    -- totalDamage is already net of absorb/block/resist (confirmed via
-    -- debug log: dmg=43 absorbed=8), so those are extra, not subtracted.
     local mit = FillMitigation(absorbed, blocked, resisted,
         CL.HasBit(hitInfo, CL.AUTO_ATTACK_HITFLAG_GLANCING),
         CL.HasBit(hitInfo, CL.AUTO_ATTACK_HITFLAG_CRUSHING))
@@ -122,49 +109,29 @@ local function HandleAutoAttack(isSelf, attackerGuid, targetGuid, totalDamage, h
         local isCrit = CL.HasBit(hitInfo, CL.AUTO_ATTACK_HITFLAG_CRIT)
         CL.Aggregator.RecordDamage(attackerGuid, targetGuid, nil, nil, nil, totalDamage, isCrit, isOffhand, nil, mit)
     else
-        -- dmg=0 auto-attacks are avoided swings (dodge/parry/miss/etc,
-        -- not "0 damage hits") - see Core.lua's VICTIMSTATE_* comment.
-        -- Off-hand misses carry the same 0x04 bit (hitInfo=20 = 0x14 =
-        -- miss|offhand). A swing fully soaked by a shield comes through
-        -- as a "normal" victimState with 0 damage - count it as absorb.
+        -- A swing a shield soaked entirely arrives as a "normal" victim
+        -- state with 0 damage - it's an absorb, not an unknown outcome.
         victimState = tonumber(victimState)
         local fullAbsorb = victimState == CL.VICTIMSTATE_NORMAL and mit and mit.absorbed > 0
         CL.Aggregator.RecordAvoidance(attackerGuid, targetGuid, victimState, isOffhand, mit, fullAbsorb)
     end
 end
 
--- SPELL_DAMAGE_EVENT's last argument is "effect1,effect2,effect3,auraType"
--- per Nampower's EVENTS.md - the 4th field only present "if applicable".
--- auraType 3 (SPELL_AURA_PERIODIC_DAMAGE), 89
--- (SPELL_AURA_PERIODIC_DAMAGE_PERCENT), or 53 (SPELL_AURA_PERIODIC_LEECH -
--- Siphon Life's actual aura type, since it damages the target AND heals
--- the caster from one periodic tick), per vmangos-core's
--- SpellAuraDefines.h, means this specific damage instance was a DoT
--- tick, not the spell's initial hit - e.g. Rake/Immolate's opening
--- strike can crit, the bleed/burn ticks after it never can, and mixing
--- both into one min/max is exactly what read as "weird" reports.
--- There's no dedicated periodic flag (unlike SPELL_HEAL's periodicFlag
--- param below), so this is the only signal available - a full
--- comma-split (not just "whatever's after the last comma") is
--- necessary since a non-periodic hit's effect string only has 3 fields,
--- not 4, so its last field is a real effect number, not an aura type.
+-- SPELL_DAMAGE_EVENT's effect argument is "effect1,effect2,effect3[,auraType]".
+-- An aura type of 3 (PERIODIC_DAMAGE), 89 (PERIODIC_DAMAGE_PERCENT) or
+-- 53 (PERIODIC_LEECH) marks the hit as a DoT tick rather than the spell's
+-- direct hit, which lets the breakdown keep them apart (a direct hit can
+-- crit, a tick can't). This is the only periodic signal damage events carry.
 local PERIODIC_AURA_TYPES = { ["3"] = true, ["89"] = true, ["53"] = true }
 
--- Confirmed via debug log that some SPELL_AURA_PERIODIC_LEECH spells
--- (damage the target AND heal the caster off the same tick) never carry
--- an aura-type tail at all - Siphon Life's SPELL_DAMAGE_EVENT reports
--- effect=6,0,0,0 on every single tick, even though every hit IS a tick
--- (the spell has no separate upfront direct-hit component). Nampower/
--- vmangos just doesn't tag these, so effect-string parsing can't see
--- it - listed here as a known, confirmed exception. Add more spellIds
--- if another leech-style DoT (e.g. Drain Life) shows the same gap.
+-- Spells whose ticks carry no aura-type field (every hit is a tick).
+-- Extend if another leech-style DoT turns out the same.
 local ALWAYS_PERIODIC_SPELLS = {
     [18881] = true, -- Siphon Life
 }
 
--- The 4th field is captured with a pattern rather than splitting into a
--- table, so this allocates nothing per spell hit. A 3-field string (no
--- aura type) simply doesn't match.
+-- Captures the 4th field with a pattern instead of splitting, so nothing
+-- is allocated per hit. A 3-field string (no aura type) doesn't match.
 local function IsPeriodicEffect(effectStr, spellId)
     if ALWAYS_PERIODIC_SPELLS[spellId] then return true end
     if type(effectStr) ~= "string" then return false end
@@ -172,11 +139,7 @@ local function IsPeriodicEffect(effectStr, spellId)
     return auraType ~= nil and PERIODIC_AURA_TYPES[auraType] == true
 end
 
--- SPELL_DAMAGE_EVENT's mitigation argument is "absorb,block,resist"
--- (confirmed via debug log: a flat ~15% absorb aura showed up as
--- dmg=65 mitigation=12,0,0 on spells and absorbed=8 on the same
--- player's melee hits taken). string.find captures instead of a split,
--- so no table per event.
+-- SPELL_DAMAGE_EVENT's mitigation argument is "absorb,block,resist".
 local function ParseSpellMitigation(text)
     if type(text) ~= "string" then return nil end
     local _, _, absorbed, blocked, resisted = string.find(text, "^(%d+),(%d+),(%d+)")
@@ -184,13 +147,16 @@ local function ParseSpellMitigation(text)
     return FillMitigation(absorbed, blocked, resisted)
 end
 
+-- SPELL_DAMAGE_EVENT_SELF/OTHER: target, caster, spellId, amount,
+-- mitigation, hitInfo (0x02 = crit), school, effect. A fully absorbed
+-- spell (amount 0) isn't recorded.
 local function HandleSpellDamage(isSelf, targetGuid, casterGuid, spellId, amount, mitigation, hitInfo, school, effect)
     amount = tonumber(amount) or 0
     spellId = tonumber(spellId)
     hitInfo = tonumber(hitInfo)
     local name = SpellName(spellId)
     local relevant = IsRelevant(casterGuid, targetGuid)
-    if relevant then TouchActivity() end -- see HandleAutoAttack's comment - relevance-gated, not blanket
+    if relevant then TouchActivity() end
     if CL.debug then
         CL.LogLine(string.format(
             "%s[SPELL_DAMAGE_EVENT_%s] tgt=%s caster=%s spell=%s(%s) dmg=%d mitigation=%s hitInfo=%s school=%s effect=%s",
@@ -205,12 +171,14 @@ local function HandleSpellDamage(isSelf, targetGuid, casterGuid, spellId, amount
     end
 end
 
--- Nampower's heal event carries no overheal, so it's estimated from the
--- target's missing health at event time (same approach as Skada):
--- effective = min(heal, maxHp - hp). SuperWoW lets UnitHealth take the
--- raw GUID. Outside the group, vanilla reports health as a 0-100
--- percentage (max 100), which can't be compared to a heal amount - those
--- heals count as fully effective and are flagged unverified.
+-- Heal events carry no overheal, so it's estimated from the target's
+-- missing health when the event arrives (the health read is from before
+-- the heal lands): effective = min(heal, maxHp - hp). SuperWoW accepts
+-- the raw GUID as the unit. Outside the group health reads as a 0-100
+-- percentage, which can't be compared to a heal amount - such heals
+-- count as fully effective and are flagged unverified.
+-- Returns effective, overheal, verified, hp, maxHp (the last two for
+-- the debug log).
 local function EstimateHeal(targetGuid, amount)
     if not targetGuid or not UnitHealth or not UnitHealthMax then return amount, 0, false end
     local okHp, hp = pcall(UnitHealth, targetGuid)
@@ -224,13 +192,16 @@ local function EstimateHeal(targetGuid, amount)
     return effective, amount - effective, true, hp, maxHp
 end
 
+-- SPELL_HEAL_BY_SELF/OTHER: target, caster, spellId, amount, crit,
+-- periodic. SPELL_HEAL_ON_SELF isn't registered: it duplicates whichever
+-- BY_* event already reported a heal landing on the player.
 local function HandleSpellHeal(targetGuid, casterGuid, spellId, amount, critFlag, periodicFlag)
     amount = tonumber(amount) or 0
     spellId = tonumber(spellId)
     local name = SpellName(spellId)
     local isCrit = (critFlag == "1" or critFlag == 1 or critFlag == true)
     local relevant = IsRelevant(casterGuid, targetGuid)
-    if relevant then TouchActivity() end -- see HandleAutoAttack's comment - relevance-gated, not blanket
+    if relevant then TouchActivity() end
     local effective, overheal, verified, hp, maxHp
     if relevant and amount > 0 then
         effective, overheal, verified, hp, maxHp = EstimateHeal(targetGuid, amount)
@@ -247,14 +218,14 @@ local function HandleSpellHeal(targetGuid, casterGuid, spellId, amount, critFlag
     end
 end
 
--- casterGuid, targetGuid, spellId - the spell that got dispelled, not
--- the dispel spell itself (so the breakdown window's per-ability list
--- shows "what did I cleanse", e.g. "Poison" x3, not just "Cleanse" x3).
+-- SPELL_DISPEL_BY_SELF/OTHER: caster, target, spellId. The spellId is
+-- the aura that was removed, not the dispel spell, so the breakdown reads
+-- "what was cleansed" (Poison x3) rather than "Cleanse x3".
 local function HandleSpellDispel(casterGuid, targetGuid, spellId)
     spellId = tonumber(spellId)
     local name = SpellName(spellId)
     local relevant = IsRelevant(casterGuid, targetGuid)
-    if relevant then TouchActivity() end -- see HandleAutoAttack's comment - relevance-gated, not blanket
+    if relevant then TouchActivity() end
     if CL.debug then
         CL.LogLine(string.format(
             "%s[SPELL_DISPEL] caster=%s tgt=%s spell=%s(%s)",
@@ -265,26 +236,18 @@ local function HandleSpellDispel(casterGuid, targetGuid, spellId)
     end
 end
 
--- Debuffs given - two Nampower event families, each missing half of
--- what's needed, that fire on consecutive lines for the same cast:
---   AURA_CAST_ON_* - spellId, casterGuid, targetGuid, ... (caster, but
---                     no reliable buff/debuff classification)
---   DEBUFF_ADDED_* - guid, slot, spellId, ... (reliable classification -
---                     this event only fires for debuffs - but no caster)
--- AURA_CAST_ON_* stashes caster keyed by (targetGuid, spellId); the
--- following DEBUFF_ADDED_* looks that key up to get both pieces at
--- once. A single cast can fire AURA_CAST_ON_* more than once (multi-
--- effect auras like shapeshifts), which just overwrites the same key
--- harmlessly since the caster is identical each time.
---
--- BUFF_ADDED_* uses the same mechanism but is deliberately not wired to
--- anything - "Buffs Given" doesn't fit this addon's per-encounter model,
--- since prebuffing happens out of combat, before the encounter it's for
--- even starts (see Aggregator.lua). Not registering BUFF_ADDED_* at all,
--- so unmatched buff-side AURA_CAST entries just expire via the periodic
--- pendingAuraCasts sweep below instead of ever being looked up.
-local pendingAuraCasts = {} -- key = targetGuid.."|"..spellId -> { casterGuid, time }
-local PENDING_AURA_WINDOW = 2 -- seconds - generous margin since the two events fire on adjacent lines for the same cast
+-- Debuffs given need two events that each carry half the answer and fire
+-- back to back for the same cast:
+--   AURA_CAST_ON_*  spellId, caster, target  (who cast it, but not
+--                   whether the aura is a buff or a debuff)
+--   DEBUFF_ADDED_*  guid, slot, spellId      (only fires for debuffs,
+--                   but has no caster)
+-- AURA_CAST stashes the caster under (target, spellId); DEBUFF_ADDED
+-- claims it. Buff-side casts are never claimed (BUFF_ADDED_* isn't
+-- registered - "buffs given" doesn't fit a per-encounter meter, since
+-- buffing happens before the pull) and expire in the OnUpdate sweep.
+local pendingAuraCasts = {} -- [targetGuid.."|"..spellId] = { casterGuid, time }
+local PENDING_AURA_WINDOW = 2 -- seconds; the pair normally arrives back to back
 
 local function HandleAuraCast(spellId, casterGuid, targetGuid)
     spellId = tonumber(spellId)
@@ -293,19 +256,11 @@ local function HandleAuraCast(spellId, casterGuid, targetGuid)
         CL.LogLine(string.format("[AURA_CAST] caster=%s tgt=%s spell=%s(%s)",
             tostring(casterGuid), tostring(targetGuid), tostring(SpellName(spellId)), tostring(spellId)))
     end
-    -- Only worth stashing if this could ever be relevant later (the
-    -- target is what DEBUFF_ADDED_* will key off of, so caster
-    -- relevance is checked again at that point too, but there's no
-    -- reason to stash something neither side is tracked for).
     if not IsRelevant(casterGuid, targetGuid) then return end
     pendingAuraCasts[targetGuid .. "|" .. spellId] = { casterGuid = casterGuid, time = GetTime() }
 
-    -- "Casts" count for the breakdown window (see UI_BreakdownWindow.lua)
-    -- - fires once per actual cast, unlike a DoT's damage entry which
-    -- fires once per tick. RecordCast no-ops internally for a caster
-    -- that isn't actually tracked, and for a spell that never ends up
-    -- dealing damage it just sits as an unread pending count - safe to
-    -- call unconditionally here.
+    -- One AURA_CAST per actual cast, which is what the breakdown's
+    -- "Casts" line counts for a DoT (whose damage entry counts ticks).
     CL.Aggregator.RecordCast(casterGuid, spellId, SpellName(spellId))
 end
 
@@ -325,9 +280,8 @@ local function HandleDebuffAdded(guid, spellId)
     CL.Aggregator.RecordDebuffGiven(pending.casterGuid, guid, spellId, SpellName(spellId))
 end
 
--- SPELL_ENERGIZE's shape isn't wired up yet - log every raw arg instead.
--- (DAMAGE_SHIELD/SPELL_MISS were deciphered this way, from real
--- debug-log data - see their handlers below.)
+-- Events whose argument layout isn't decoded yet (SPELL_ENERGIZE_*) are
+-- logged raw so their shape can be read off a debug log.
 local function LogRawEvent(tag)
     if not CL.debug then return end
     CL.LogLine(string.format("[RAW %s] a1=%s a2=%s a3=%s a4=%s a5=%s a6=%s a7=%s a8=%s a9=%s",
@@ -335,18 +289,9 @@ local function LogRawEvent(tag)
         tostring(arg5), tostring(arg6), tostring(arg7), tostring(arg8), tostring(arg9)))
 end
 
--- DAMAGE_SHIELD_SELF/OTHER - vanilla's own dedicated "damage shield"
--- reflect event (Thorns, Retribution Aura, Vengeance, etc.), confirmed
--- via debug log: a1=caster (the unit wearing the reflect buff, dealing
--- this damage), a2=target (whoever struck them), a3=amount, a4=school.
--- This is a genuinely separate Nampower signal from SPELL_DAMAGE_EVENT
--- - no ambiguity about which real ability it was, unlike trying to
--- infer a reflect proc from a shared spellId. Matches how GreedMeter
--- itself identifies reflect damage too (vanilla's own DAMAGESHIELD
--- combat log text, a similarly dedicated signal, just read via chat
--- parsing instead of this Nampower event). No real spellId comes with
--- it, so REFLECT_SPELL_ID is a fixed synthetic id used only for this
--- bucket, named "Reflect" to match GreedMeter's own label.
+-- DAMAGE_SHIELD_SELF/OTHER: caster (the unit wearing Thorns/Retribution
+-- Aura/...), target (whoever struck it), amount, school. No spellId comes
+-- with it, so all reflect damage shares one synthetic "Reflect" entry.
 local REFLECT_SPELL_ID = -1
 
 local function HandleDamageShield(isSelf, casterGuid, targetGuid, amount, school)
@@ -365,10 +310,9 @@ local function HandleDamageShield(isSelf, casterGuid, targetGuid, amount, school
     end
 end
 
--- SPELL_MISS_SELF/OTHER - confirmed via debug log: a1=caster, a2=target,
--- a3=spellId, a4=missInfo (see Aggregator.lua's SPELL_MISS_KEY). Covers
--- yellow melee specials too (a dodged Sinister Strike), which never
--- reach AUTO_ATTACK's victimState path.
+-- SPELL_MISS_SELF/OTHER: caster, target, spellId, missInfo (see
+-- Aggregator's SPELL_MISS_KEY). Also covers yellow melee specials (a
+-- dodged Sinister Strike), which never reach AUTO_ATTACK.
 local function HandleSpellMiss(isSelf, casterGuid, targetGuid, spellId, missInfo)
     spellId = tonumber(spellId)
     missInfo = tonumber(missInfo)
@@ -384,12 +328,10 @@ local function HandleSpellMiss(isSelf, casterGuid, targetGuid, spellId, missInfo
     end
 end
 
--- ENVIRONMENTAL_DMG_SELF/OTHER - a1=unit, a2=damageType, a3=damage,
--- a4=absorb, a5=resist (Skada's mapping; not yet confirmed in our own
--- debug log). No attacker, so it records as Damage Taken only, under a
--- synthetic negative spellId per type (like REFLECT_SPELL_ID) so each
--- type gets its own breakdown row. Never starts an encounter: falling
--- or drowning outside combat isn't a fight.
+-- ENVIRONMENTAL_DMG_SELF/OTHER: unit, damageType, damage, absorb, resist.
+-- There's no attacker, so it's Damage Taken only, under one synthetic
+-- negative spellId per type so each type gets its own breakdown row.
+-- Never starts an encounter: falling or drowning alone isn't a fight.
 local ENVIRONMENT_TYPES = {
     [0] = { name = "Fatigue", school = 0 },
     [1] = { name = "Drowning", school = 0 },
@@ -418,59 +360,54 @@ local function HandleEnvironmentalDamage(isSelf, unitGuid, damageType, amount)
     CL.Aggregator.RecordDamage(nil, unitGuid, spellId, env.name, env.school, amount, false, nil, false)
 end
 
-local autoShownMainWindow = false -- see the PLAYER_ENTERING_WORLD handler below
-
--- Encounter end: PLAYER_REGEN_ENABLED only marks the encounter as
--- pending-end (pendingEndSince). The OnUpdate below finishes it once
--- neither the player, any group member, nor any tracked pet has been in
--- combat for END_DEBOUNCE seconds. Dying, Feign Death or briefly
--- dropping combat mid-pull therefore no longer splits the fight while
--- the group is still engaged. A PLAYER_REGEN_DISABLED inside the
--- debounce cancels the pending end and continues the same encounter.
+--------------------------------------------------------------------------
+-- Encounter lifecycle
 --
--- Some targets (training dummies) never toggle regen at all; the
--- CL.IDLE_SECONDS fallback in OnUpdate covers those.
+-- Start: PLAYER_REGEN_DISABLED, or lazily on the first recorded event
+-- (see Aggregator's ShouldLazyStart/IsGroupFighting).
+-- End: PLAYER_REGEN_ENABLED only arms a pending end (pendingEndSince);
+-- OnUpdate finishes the encounter once the player, every group member
+-- and every pet have been out of combat for END_DEBOUNCE seconds. So
+-- dying, Feign Death or briefly dropping combat mid-pull doesn't split
+-- the fight while the group is still engaged, and re-entering combat
+-- inside the debounce continues the same encounter.
+-- Fallback: CL.IDLE_SECONDS without a relevant event ends it too
+-- (targets like training dummies never toggle regen), unless the group
+-- is still in combat.
+--------------------------------------------------------------------------
+
 local END_DEBOUNCE = 1.5
 local pendingEndSince = nil
+local autoShownMainWindow = false -- first PLAYER_ENTERING_WORLD only, see below
 
 local function IsGrouped()
     return ((GetNumRaidMembers and GetNumRaidMembers()) or 0) > 0
         or ((GetNumPartyMembers and GetNumPartyMembers()) or 0) > 0
 end
 
--- Tracked across PARTY_MEMBERS_CHANGED/RAID_ROSTER_UPDATE so "Clear on
--- join party" (Options) can fire only on the actual solo -> grouped
--- transition, not on every roster change while already grouped (someone
--- else joining/leaving a raid you're already in shouldn't wipe Overall).
+-- Grouped state as of the last roster event, so Options' "clear Overall
+-- on joining a group" fires only on the solo -> grouped transition, not
+-- on every roster change while already grouped.
 local wasGrouped = IsGrouped()
 
 local UnitInCombat = CL.GuidCache.UnitInCombat
 local AnyGroupMemberInCombat = CL.GuidCache.AnyGroupMemberInCombat -- cached ~0.25s, see GuidCache.lua
 
 local function FinishEncounter()
-    -- lastEventTime (touched by every relevant combat event - see
-    -- TouchActivity above) trims trailing idle time out of the reported
-    -- duration, matching GreedMeter's own Parser:OnCombatEnd - see
-    -- Aggregator.lua's EndEncounter for why.
     pendingEndSince = nil
     local finished = CL.Aggregator.EndEncounter(lastEventTime)
     if not finished then return end
 
-    -- Skip saving near-nothing encounters (a stray hit that barely
-    -- registered before the idle timeout) - not worth a history slot.
-    -- "Remember boss fights only" (Options) additionally skips anything
-    -- that never hit a boss-tagged enemy (Aggregator's isBoss).
+    -- Not saved: near-empty encounters (a stray hit before the idle
+    -- timeout), and non-boss fights while "Remember boss fights only" is on.
     local bossOnly = CL.GetSetting("historyBossOnly") and not finished.isBoss
     if finished.duration > 1 and CL.TableCount(finished.units) > 0 and not bossOnly and CL.History then
         CL.History.SaveEncounter(finished)
     end
 
-    -- FinishEncounter also fires from the idle-timeout fallback (no
-    -- combat events for a while, not necessarily actually out of combat
-    -- - a slow-starting fight can trip this while regen is still
-    -- disabled). Only auto-hide when genuinely out of combat, or the
-    -- window can hide itself mid-fight with nothing left to re-show it
-    -- until the next real PLAYER_REGEN_DISABLED.
+    -- The idle-timeout path can finish an encounter while the player is
+    -- still flagged in combat; auto-hiding then would leave the window
+    -- hidden mid-fight, so only hide when genuinely out of combat.
     if CL.UI and CL.UI.ApplyAutoHide and not UnitAffectingCombat("player") then
         CL.UI.ApplyAutoHide()
     end
@@ -484,12 +421,8 @@ local function FinishEncounter()
     end
 end
 
--- Debug-only diagnostic for both regen events, ahead of whatever fix
--- comes next - logs enough to actually see the real event timeline
--- (with /cl debug on) instead of guessing at one again. Counts raid/
--- party members currently showing UnitAffectingCombat so it's possible
--- to tell, after the fact, whether the group was genuinely still
--- fighting when regen cleared for the player.
+-- Debug log only: the player's and group's combat flags at each regen
+-- event, for reading encounter boundaries back out of a log.
 local function LogRegenDiagnostic(evt)
     if not CL.debug then return end
     local okP, playerCombat = pcall(UnitAffectingCombat, "player")
@@ -512,30 +445,29 @@ local function LogRegenDiagnostic(evt)
         evt, GetTime(), tostring(okP and playerCombat), raidN, partyN, othersInCombat))
 end
 
-local f = CreateFrame("Frame")
+--------------------------------------------------------------------------
+-- Dispatch
+--------------------------------------------------------------------------
 
-f:SetScript("OnEvent", function()
+-- Reads the 1.12 event globals (event, arg1..arg9) directly so it can be
+-- pcall'd without building an argument table per event.
+local function Dispatch()
     if event == "PLAYER_ENTERING_WORLD" then
         EnableCVars()
         CL.GuidCache.Purge()
         CL.GuidCache.RefreshRoster()
-        -- Deferred here (not called at UI_MainWindow.lua's file-load
-        -- time) so the saved size/position is actually there to restore
-        -- by the time the window shows - see that file's own comment.
-        -- Once per session only, not every zone/loading screen.
+        -- Once per session, not per loading screen. SavedVariables are
+        -- only in place by now (not at file load), so this is the first
+        -- point where saved state and window layouts can be restored.
         if not autoShownMainWindow then
             autoShownMainWindow = true
-            -- Restore current/overall before the window's first Show()
-            -- so it renders with the real data immediately, not a blank
-            -- state that then jumps. If a live fight got restored,
-            -- treat "just reloaded" as activity so the normal idle
-            -- timeout can close it out shortly if nothing follows,
-            -- rather than it sitting there indefinitely un-timed-out.
+            -- Restore before the first Show() so windows open on real data.
             CL.Aggregator.RestoreState(CombatLedgerDB.liveState)
             if CL.Aggregator.GetCurrent() then
+                -- A restored live fight gets the normal idle/end handling;
+                -- reloading out of combat means no REGEN_ENABLED will
+                -- come, so arm the end debounce directly.
                 TouchActivity()
-                -- No PLAYER_REGEN_ENABLED will arrive if we reloaded
-                -- out of combat - start the end debounce ourselves.
                 if not UnitInCombat("player") then
                     pendingEndSince = GetTime()
                 end
@@ -543,10 +475,6 @@ f:SetScript("OnEvent", function()
             if CL.UI and CL.UI.RestoreAllWindows then
                 CL.UI.RestoreAllWindows()
             end
-            -- Same timing issue as UI.Show() above - the minimap button
-            -- is created at file-load time (before real SavedVariables
-            -- are restored), so its shown/hidden state has to be synced
-            -- here rather than decided at creation.
             if CL.UIOptions then
                 CL.UIOptions.RefreshMinimapVisibility()
                 CL.UIOptions.RefreshMinimapPosition()
@@ -556,14 +484,10 @@ f:SetScript("OnEvent", function()
     end
 
     if event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" or event == "UNIT_PET" then
-        -- UNIT_PET covers summon/dismiss/death mid-session - roster
-        -- refresh on party/raid change alone misses a pet that appears
-        -- or disappears without the group composition itself changing.
+        -- UNIT_PET: a pet summoned/dismissed/killed changes the roster
+        -- without changing group composition.
         CL.GuidCache.RefreshRoster()
         if event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
-            -- Only the two real group-composition events, not UNIT_PET -
-            -- a pet appearing/disappearing doesn't change whether the
-            -- player is grouped, which is all this checks.
             if CL.UI and CL.UI.ReconcileGroupVisibility then
                 CL.UI.ReconcileGroupVisibility()
             end
@@ -584,12 +508,10 @@ f:SetScript("OnEvent", function()
     end
 
     if event == "PLAYER_LOGOUT" then
+        -- Also fires on /reload. Current and Overall live only in
+        -- Aggregator locals, so they're persisted here and restored on
+        -- the next PLAYER_ENTERING_WORLD.
         CL.FlushLog()
-        -- Also fires on /reload (not just a real logout) - without this,
-        -- the in-progress fight and the whole session's Overall totals
-        -- would be silently lost on every reload, since they only exist
-        -- as Lua locals otherwise. See Aggregator.lua's
-        -- SerializeState/RestoreState.
         CombatLedgerDB.liveState = CL.Aggregator.SerializeState()
         return
     end
@@ -631,14 +553,6 @@ f:SetScript("OnEvent", function()
         return
     end
 
-    -- SPELL_HEAL_ON_SELF deliberately NOT handled (not even registered
-    -- below) - confirmed via debug log to always double-fire alongside
-    -- whichever BY_* event already covers the same heal (BY_SELF for a
-    -- self-cast heal, BY_OTHER for an incoming heal from someone else -
-    -- both were logging the identical heal twice, once as tgt=player
-    -- caster=X via BY_OTHER, once via ON_SELF). BY_SELF + BY_OTHER
-    -- already cover every possible caster, so ON_SELF is a pure
-    -- duplicate whenever you're the one being healed.
     if event == "SPELL_HEAL_BY_SELF" or event == "SPELL_HEAL_BY_OTHER" then
         HandleSpellHeal(arg1, arg2, arg3, arg4, arg5, arg6)
         return
@@ -668,15 +582,11 @@ f:SetScript("OnEvent", function()
         return
     end
 
-    -- Shape: casterGuid, targetGuid, spellId - see HandleSpellDispel
-    -- above.
     if event == "SPELL_DISPEL_BY_SELF" or event == "SPELL_DISPEL_BY_OTHER" then
         HandleSpellDispel(arg1, arg2, arg3)
         return
     end
 
-    -- Debuffs given - see HandleAuraCast/HandleDebuffAdded above for the
-    -- correlation mechanism.
     if event == "AURA_CAST_ON_SELF" or event == "AURA_CAST_ON_OTHER" then
         HandleAuraCast(arg1, arg2, arg3)
         return
@@ -690,9 +600,8 @@ f:SetScript("OnEvent", function()
     if event == "UNIT_DIED" then
         if arg1 then
             local attributed = CL.Aggregator.RecordDeath(arg1)
-            -- Auto-open only for the player's own death (a raid wipe would
-            -- otherwise fire this repeatedly, popping over itself) - other
-            -- tracked deaths still get a recap recorded, just not shown.
+            -- The recap opens by itself only for the player's own death;
+            -- a wipe would otherwise stack a window per raid member.
             if attributed and CL.UIDeathRecap then
                 local ok, exists, playerGuid = pcall(UnitExists, "player")
                 if ok and exists and attributed == playerGuid then
@@ -702,25 +611,27 @@ f:SetScript("OnEvent", function()
         end
         return
     end
-end)
+end
 
--- Flushing the log buffer to disk on every single event would be a lot
--- of file I/O during a real fight (see Core.lua's LogLine comment) - this
--- throttles it to roughly once a second instead, using the same
--- OnUpdate the end-of-encounter checks below already run on.
+--------------------------------------------------------------------------
+-- Periodic work (OnUpdate)
+--------------------------------------------------------------------------
+
 local flushAccum = 0
+local cleanupAccum = 0
+local CACHE_CLEANUP_SECONDS = 60
 local idleSuppressedLogged = false
-f:SetScript("OnUpdate", function()
-    flushAccum = flushAccum + arg1
+
+-- Reads the OnUpdate elapsed-time global (arg1) directly; see Dispatch.
+local function Tick()
+    local elapsed = arg1
+    flushAccum = flushAccum + elapsed
     if flushAccum >= 1 then
         flushAccum = 0
+        -- Debug log writes are batched to once a second rather than per event.
         CL.FlushLog()
-        -- Same ~1s cadence: sweep any AURA_CAST that never got matched
-        -- to a DEBUFF_ADDED - includes every buff-side entry (BUFF_ADDED
-        -- isn't registered, see HandleAuraCast's comment) plus genuinely
-        -- unmatched debuffs (filtered target, edge case aura with no
-        -- slot event, ...) - so pendingAuraCasts doesn't grow unbounded
-        -- over a long session.
+        -- AURA_CAST entries that were never claimed (buff casts, filtered
+        -- targets) expire here so the table stays small.
         local key, pending
         for key, pending in pairs(pendingAuraCasts) do
             if (GetTime() - pending.time) > PENDING_AURA_WINDOW then
@@ -729,13 +640,17 @@ f:SetScript("OnUpdate", function()
         end
     end
 
-    -- An encounter can be live while the player was never flagged in
-    -- combat (a heal/dispel/damage on a fighting groupmate lazy-started
-    -- it - see Aggregator.lua's IsGroupFighting), so no REGEN_ENABLED
-    -- will ever arm the end. Arm it here once the group is seen
-    -- fighting; it then closes like any other pull. Not armed when the
+    cleanupAccum = cleanupAccum + elapsed
+    if cleanupAccum >= CACHE_CLEANUP_SECONDS then
+        cleanupAccum = 0
+        CL.GuidCache.CleanupStale()
+    end
+
+    -- An encounter lazily started while the player was never flagged in
+    -- combat (a heal on a fighting groupmate) gets no REGEN_ENABLED, so
+    -- arm its end once the group is seen fighting. Not armed when the
     -- group isn't fighting either, so a solo training-dummy fight keeps
-    -- relying on the idle timeout below.
+    -- relying on the idle timeout.
     if not pendingEndSince and CL.Aggregator.GetCurrent() and not UnitInCombat("player")
         and AnyGroupMemberInCombat() then
         pendingEndSince = GetTime()
@@ -746,8 +661,7 @@ f:SetScript("OnUpdate", function()
         if not CL.Aggregator.GetCurrent() then
             pendingEndSince = nil
         elseif UnitInCombat("player") then
-            -- Re-entered combat without a REGEN_DISABLED (e.g. restored
-            -- state) - the encounter is live again.
+            -- Back in combat without a REGEN_DISABLED (restored state).
             pendingEndSince = nil
         else
             if AnyGroupMemberInCombat() then
@@ -760,21 +674,11 @@ f:SetScript("OnUpdate", function()
         end
     end
 
+    -- Idle fallback. Suppressed while any group member is in combat: a
+    -- quiet stretch in the player's own events (a healer off to the side)
+    -- doesn't mean the raid stopped, and ending here would split the pull.
     if CL.Aggregator.GetCurrent() and lastEventTime > 0 and (GetTime() - lastEventTime) > CL.IDLE_SECONDS then
-        -- This fallback exists for targets that never toggle regen at
-        -- all (training dummies) - solo, that's the only way an
-        -- encounter against one would ever end. But in a group, a local
-        -- lull in events the player happens to be involved in doesn't
-        -- mean the raid stopped fighting (e.g. a healer standing off to
-        -- the side of a melee pack can easily see 12+ quiet seconds of
-        -- its own). Same guard as the regen path: don't let this fire
-        -- while someone else in the group is still actually in combat,
-        -- or this ends the encounter and Aggregator.lua's lazy
-        -- "if not current then StartEncounter()" immediately spins up a
-        -- new one on the very next raid-wide event, fragmenting one
-        -- continuous pull into several.
-        local grouped = ((GetNumRaidMembers and GetNumRaidMembers()) or 0) > 0
-            or ((GetNumPartyMembers and GetNumPartyMembers()) or 0) > 0
+        local grouped = IsGrouped()
         if not grouped or not AnyGroupMemberInCombat() then
             if CL.debug and grouped and idleSuppressedLogged then
                 CL.LogLine("[REGEN] idle-timeout finishing - group also clear")
@@ -790,6 +694,19 @@ f:SetScript("OnUpdate", function()
     else
         idleSuppressedLogged = false
     end
+end
+
+local f = CreateFrame("Frame")
+
+f:SetScript("OnEvent", function()
+    CL.CountEvent(event)
+    local ok, err = pcall(Dispatch)
+    if not ok then CL.RecordError(event, err) end
+end)
+
+f:SetScript("OnUpdate", function()
+    local ok, err = pcall(Tick)
+    if not ok then CL.RecordError("Events:OnUpdate", err) end
 end)
 
 f:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -805,8 +722,6 @@ f:RegisterEvent("SPELL_DAMAGE_EVENT_SELF")
 f:RegisterEvent("SPELL_DAMAGE_EVENT_OTHER")
 f:RegisterEvent("SPELL_HEAL_BY_SELF")
 f:RegisterEvent("SPELL_HEAL_BY_OTHER")
--- SPELL_HEAL_ON_SELF not registered - see OnEvent's comment, it's a
--- confirmed duplicate of BY_SELF/BY_OTHER whenever you're healed.
 f:RegisterEvent("SPELL_MISS_SELF")
 f:RegisterEvent("SPELL_MISS_OTHER")
 f:RegisterEvent("ENVIRONMENTAL_DMG_SELF")
@@ -824,20 +739,73 @@ f:RegisterEvent("DEBUFF_ADDED_SELF")
 f:RegisterEvent("DEBUFF_ADDED_OTHER")
 f:RegisterEvent("UNIT_DIED")
 
--- /cl status walks current.units - table.getn doesn't work on a
--- guid-keyed table, so it needs CL.TableCount too; simplest to keep the
--- printed unit list here rather than exposing internals from Aggregator.
+--------------------------------------------------------------------------
+-- /cl status
+--------------------------------------------------------------------------
+
+-- Nampower's combat events, i.e. the data source. Counted separately from
+-- lifecycle events so status can show whether combat data is arriving.
+local COMBAT_EVENTS = {
+    "AUTO_ATTACK_SELF", "AUTO_ATTACK_OTHER", "SPELL_DAMAGE_EVENT_SELF", "SPELL_DAMAGE_EVENT_OTHER",
+    "SPELL_HEAL_BY_SELF", "SPELL_HEAL_BY_OTHER", "SPELL_MISS_SELF", "SPELL_MISS_OTHER",
+    "ENVIRONMENTAL_DMG_SELF", "ENVIRONMENTAL_DMG_OTHER", "DAMAGE_SHIELD_SELF", "DAMAGE_SHIELD_OTHER",
+    "SPELL_DISPEL_BY_SELF", "SPELL_DISPEL_BY_OTHER", "AURA_CAST_ON_SELF", "AURA_CAST_ON_OTHER",
+    "DEBUFF_ADDED_SELF", "DEBUFF_ADDED_OTHER", "UNIT_DIED",
+}
+
+local function YesNo(v) return v and "|cff40ff40yes|r" or "|cffff4040no|r" end
+
 local function PrintStatus()
+    local version = (GetAddOnMetadata and GetAddOnMetadata("CombatLedger", "Version")) or "?"
+    CL.Print("Status (v" .. version .. ")")
+
+    -- Data source: Nampower's events plus SuperWoW's GUID-as-unit support.
+    local npVersion = "not loaded"
+    if GetNampowerVersion then
+        local ok, a, b, c = pcall(GetNampowerVersion)
+        if ok and a then
+            npVersion = tostring(a)
+            if b then npVersion = npVersion .. "." .. tostring(b) end
+            if c then npVersion = npVersion .. "." .. tostring(c) end
+        end
+    end
+    local okGuid, _, playerGuid = pcall(UnitExists, "player")
+    CL.Print(string.format("  Nampower: %s   GUID units: %s   Debug log file: %s   Debug: %s",
+        npVersion, YesNo(okGuid and playerGuid), YesNo(WriteCustomFile ~= nil), CL.debug and "on" or "off"))
+
+    local diag = CL.Diagnostics
+    local combatTotal = 0
+    local i
+    for i = 1, table.getn(COMBAT_EVENTS) do
+        combatTotal = combatTotal + (diag.eventCounts[COMBAT_EVENTS[i]] or 0)
+    end
+    CL.Print(string.format("  Combat events received this session: %d", combatTotal))
+
+    if CL.Threat and CL.Threat.GetLastUpdate then
+        local last = CL.Threat.GetLastUpdate()
+        CL.Print("  Threat: " .. ((last and last > 0)
+            and string.format("last server reply %.0fs ago", GetTime() - last)
+            or "no server reply this session (local estimate only)"))
+    end
+
+    local errorTags = 0
+    local tag, count
+    for tag, count in pairs(diag.errorCounts) do
+        errorTags = errorTags + 1
+        CL.Print(string.format("  |cffff4040Error|r %s x%d: %s", tag, count, tostring(diag.lastErrors[tag])))
+    end
+    if errorTags == 0 then CL.Print("  Errors: none") end
+
     local cur = CL.Aggregator.GetCurrent()
     if not cur then
-        CL.Print("No live encounter.")
+        CL.Print("  No live encounter.")
         return
     end
-    CL.Print(string.format("Live encounter: %.1fs elapsed, %d unit(s) tracked.",
+    CL.Print(string.format("  Live encounter: %.1fs elapsed, %d unit(s) tracked.",
         GetTime() - cur.startTime, CL.TableCount(cur.units)))
     local guid, u
     for guid, u in pairs(cur.units) do
-        CL.Print(string.format("  %s - dmgDone=%d dmgTaken=%d healDone=%d deaths=%d",
+        CL.Print(string.format("    %s - dmgDone=%d dmgTaken=%d healDone=%d deaths=%d",
             tostring(u.name), u.damageDone.total, u.damageTaken.total, u.healingDone.total, u.deaths))
     end
 end
@@ -847,12 +815,8 @@ SlashCmdList["COMBATLEDGER"] = function(msg)
     msg = string.lower(msg or "")
     if msg == "debug" then
         CL.debug = not CL.debug
-        -- Persisted (not just a runtime flag) so it survives a relaunch -
-        -- CL.debug used to always reset to false on load, meaning it was
-        -- structurally impossible to ever capture PLAYER_ENTERING_WORLD's
-        -- own debug output (it fires before you can ever type /cl debug
-        -- on a fresh login). Turn it on once and it stays on for the
-        -- next login too, until toggled off again.
+        -- Persisted, so debug stays on across a relaunch and can capture
+        -- the very first PLAYER_ENTERING_WORLD.
         CombatLedgerDB.settings.debug = CL.debug
         CL.Print("Debug " .. (CL.debug and "ON" or "OFF"))
     elseif msg == "status" then
@@ -882,17 +846,15 @@ SlashCmdList["COMBATLEDGER"] = function(msg)
     elseif msg == "options" or msg == "opt" then
         if CL.UIOptions then CL.UIOptions.Toggle() end
     elseif msg == "testdeath" then
-        -- Snapshots whatever's currently in your rolling hit-history
-        -- buffer and shows the recap, without touching the real death
-        -- counter - fight something for a few seconds then run this,
-        -- rather than actually dying to test the window.
+        -- Shows the recap from the current rolling hit buffer without
+        -- touching the real death count.
         local ok, exists, playerGuid = pcall(UnitExists, "player")
         if ok and exists and playerGuid then
             CL.Aggregator.SnapshotDeathRecap(playerGuid)
             if CL.UIDeathRecap then CL.UIDeathRecap.Show(playerGuid) end
         end
     else
-        CL.Print("/cl toggle|show|hide - meter window. /cl options - lock/minimap/appearance settings. /cl history - saved encounters. /cl report - graph + leaderboard for the current/last fight. /cl testdeath - preview the death recap without dying. /cl debug - toggle event logging. /cl status - live encounter totals. /cl flush - force-write the debug log now.")
+        CL.Print("/cl toggle|show|hide - meter window. /cl options - lock/minimap/appearance settings. /cl history - saved encounters. /cl report - graph + leaderboard for the current/last fight. /cl testdeath - preview the death recap without dying. /cl debug - toggle event logging. /cl status - data source, errors and live encounter. /cl flush - force-write the debug log now.")
     end
 end
 
