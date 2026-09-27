@@ -152,7 +152,10 @@ local function CreateWindow()
     local f = CreateFrame("Frame", "CombatLedgerOptionsWindow", UIParent)
     f:SetWidth(WINDOW_WIDTH)
     f:SetHeight(WINDOW_HEIGHT)
-    f:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    -- Anchored by its top edge, so switching tabs (which changes the
+    -- height - see FitHeight) only moves the bottom. Starts a little above
+    -- screen center so a typical tab ends up roughly centered.
+    f:SetPoint("TOP", UIParent, "CENTER", 0, 220)
     f:SetBackdrop(CL.WINDOW_BACKDROP)
     f:SetBackdropColor(0, 0, 0, 0.9)
     local themeR, themeG, themeB, themeHex = CL.GetThemeColor()
@@ -167,7 +170,14 @@ local function CreateWindow()
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", function() this:StartMoving() end)
-    f:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
+    f:SetScript("OnDragStop", function()
+        this:StopMovingOrSizing()
+        -- The client re-anchors a moved frame to whatever point it likes;
+        -- pin it back to the top-left corner so it keeps growing downward.
+        local left, top = this:GetLeft(), this:GetTop()
+        this:ClearAllPoints()
+        this:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
+    end)
     f:Hide()
 
     table.insert(UISpecialFrames, "CombatLedgerOptionsWindow")
