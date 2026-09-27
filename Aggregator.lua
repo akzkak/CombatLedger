@@ -76,7 +76,7 @@ local function RecordSeriesPoint(enc, kind, amount)
     bucket[kind] = (bucket[kind] or 0) + amount
 end
 
-local overall = NewEncounter() -- long-lived; only cleared by ResetOverall()
+local overall = NewEncounter() -- long-lived; only cleared by ResetData()
 
 -- Death recap: a rolling RECAP_WINDOW-second list of hits taken per
 -- tracked unit (the raw sequence, not totals), snapshotted on death.
@@ -284,9 +284,13 @@ local function GetOverall()
     return overall
 end
 
-local function ResetOverall()
+-- Clears Overall and the finished fight Current Fight is still showing,
+-- so the meter starts blank. A fight in progress is left alone (never
+-- wiped mid-fight) and saved History isn't touched.
+local function ResetData()
     dataVersion = dataVersion + 1
     overall = NewEncounter()
+    lastFinished = nil
 end
 
 -- Adds fields that saves from older versions may lack, so Record* can
@@ -1116,7 +1120,7 @@ CL.Aggregator = {
     GetCurrentDisplay = GetCurrentDisplay,
     GetOverall = GetOverall,
     GetOverallDuration = GetOverallDuration,
-    ResetOverall = ResetOverall,
+    ResetData = ResetData,
     MarkBoss = MarkBoss,
     CompactTargets = CompactTargets,
     GetDataVersion = function() return dataVersion end,

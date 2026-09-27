@@ -939,9 +939,9 @@ local function CreateWindowFrame(inst)
     local resetBtn = CreateHeaderButton(f, 18, "R")
     resetBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -6)
     resetBtn:SetScript("OnClick", function()
-        StaticPopup_Show("COMBATLEDGER_RESET_OVERALL")
+        StaticPopup_Show("COMBATLEDGER_RESET_DATA", "Saved History is kept.")
     end)
-    SetButtonTooltip(resetBtn, "Reset", "Clear the Overall segment", themeR, themeG, themeB)
+    SetButtonTooltip(resetBtn, "Reset", "Clear Current Fight and Overall (History is kept)", themeR, themeG, themeB)
     CL.ApplyButtonSkin(resetBtn, themeR, themeG, themeB)
     f.resetBtn = resetBtn
 
@@ -1741,31 +1741,16 @@ driver:SetScript("OnUpdate", function()
     if not ok then CL.RecordError("UI:refresh", err) end
 end)
 
-StaticPopupDialogs["COMBATLEDGER_RESET_OVERALL"] = {
-    text = "Clear the Overall segment? Current Fight and saved History aren't affected.",
+-- Manual reset (the R button) and the automatic reset rules
+-- (Events.lua); %s is the reason or a note.
+StaticPopupDialogs["COMBATLEDGER_RESET_DATA"] = {
+    text = "Reset Current Fight and Overall?\n%s",
     button1 = "Yes",
     button2 = "No",
     OnAccept = function()
-        CL.Aggregator.ResetOverall()
-        for _, inst in pairs(instances) do
-            RefreshInstance(inst)
-        end
-    end,
-    timeout = 0,
-    whileDead = 1,
-    hideOnEscape = 1,
-    exclusive = 1,
-}
-
--- Asked by the automatic reset rules (Events.lua); %s is the reason.
-StaticPopupDialogs["COMBATLEDGER_CLEAR_OVERALL"] = {
-    text = "Clear the Overall segment?\n%s",
-    button1 = "Yes",
-    button2 = "No",
-    OnAccept = function()
-        CL.Aggregator.ResetOverall()
+        CL.Aggregator.ResetData()
         UI.RefreshAllInstances()
-        CL.Print("Overall cleared.")
+        CL.Print("Data reset.")
     end,
     timeout = 0,
     whileDead = 1,

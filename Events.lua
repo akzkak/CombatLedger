@@ -386,7 +386,7 @@ local function IsGrouped()
 end
 
 --------------------------------------------------------------------------
--- Automatic Overall resets (Options, "Clear Overall"): on joining a
+-- Automatic resets (Options, Data tab, "Auto reset"): on joining a
 -- group, leaving one, or entering an instance, each Off/Ask/Always.
 -- Never applied mid-fight: a reset requested while an encounter is live
 -- waits until it finishes (the latest request wins).
@@ -400,11 +400,11 @@ local pendingReset = nil -- { mode, reason } waiting for the live fight to end
 
 local function ApplyReset(mode, reason)
     if mode == "always" then
-        CL.Aggregator.ResetOverall()
+        CL.Aggregator.ResetData()
         if CL.UI and CL.UI.RefreshAllInstances then CL.UI.RefreshAllInstances() end
-        CL.Print("Overall cleared - " .. reason)
+        CL.Print("Data reset - " .. reason)
     elseif mode == "ask" then
-        StaticPopup_Show("COMBATLEDGER_CLEAR_OVERALL", reason)
+        StaticPopup_Show("COMBATLEDGER_RESET_DATA", reason)
     end
 end
 

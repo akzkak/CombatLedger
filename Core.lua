@@ -53,7 +53,7 @@ CL.defaultSettings = {
     highlightSelfColor = { 1, 0.82, 0 }, -- Options color picker; gold by default
     barBorderEnabled = false, -- border around EVERY bar, in barBorderColor below - independent of highlightSelf, which always wins on your own row regardless of this
     barBorderColor = { 1, 1, 1 }, -- user-customizable via Options' color picker
-    -- Automatic Overall resets (see Events.lua's reset rules): "off" / "ask" / "always".
+    -- Automatic resets of Current Fight + Overall (see Events.lua): "off" / "ask" / "always".
     clearOnJoinPartyMode = "off", -- going from solo to grouped
     clearOnLeavePartyMode = "off", -- going from grouped to solo
     clearOnEnterInstanceMode = "off", -- entering an instance (not a re-entry after a short absence)

@@ -704,13 +704,13 @@ local function CreateWindow()
     end)
     f.bossOnlyCB = bossOnlyCB
 
-    -- Automatic Overall resets (Events.lua): Off / Ask / Always each.
-    -- Current Fight and History are never touched.
+    -- Automatic resets (Events.lua): Off / Ask / Always each. Clears
+    -- Current Fight and Overall; History is never touched.
     AddDivider(pageData)
     local resetHeader = pageData:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     y = NextY()
     resetHeader:SetPoint("TOPLEFT", pageData, "TOPLEFT", 14, -y)
-    resetHeader:SetText("|cffffd700Clear Overall|r")
+    resetHeader:SetText("|cffffd700Auto reset|r")
 
     local function CreateResetRule(labelText, settingKey)
         local label = pageData:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
