@@ -42,6 +42,7 @@ CL.defaultSettings = {
     numberFormat = "abbreviated", -- "abbreviated" (1.2k) / "full" (1,234) / "raw" (1234)
     lockWindow = false,
     showMinimapButton = true,
+    showBarTooltips = true, -- summary tooltip when hovering a meter bar (UI_MainWindow.lua's ShowBarTooltip)
     announceChannel = "auto", -- "auto" (raid > party > say) / "say" / "party" / "raid" / "guild"
     announceCount = 5,
     windowOpacityPct = 81, -- background alpha, as a percent - ignored while matchPfui is on

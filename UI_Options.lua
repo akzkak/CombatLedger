@@ -296,6 +296,19 @@ local function CreateWindow()
     end)
     f.minimapCB = minimapCB
 
+    local barTooltipLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    barTooltipLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 14, -y)
+    barTooltipLabel:SetText("Show tooltip on bar hover")
+    local barTooltipCB = CreateFrame("CheckButton", "CombatLedgerBarTooltipCB", pageGeneral, "UICheckButtonTemplate")
+    barTooltipCB:SetWidth(20)
+    barTooltipCB:SetHeight(20)
+    barTooltipCB:SetPoint("TOPRIGHT", pageGeneral, "TOPRIGHT", -12, -y + 3)
+    barTooltipCB:SetScript("OnClick", function()
+        CL.SetSetting("showBarTooltips", (this:GetChecked() == 1))
+    end)
+    f.barTooltipCB = barTooltipCB
+
     -- Announce
     AddDivider(pageGeneral)
     local announceHeader = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -871,6 +884,7 @@ local function CreateWindow()
             pfUI.api.SkinCloseButton(closeBtn)
             pfUI.api.SkinCheckbox(lockCB)
             pfUI.api.SkinCheckbox(minimapCB)
+            pfUI.api.SkinCheckbox(barTooltipCB)
             pfUI.api.SkinCheckbox(hideBorderCB)
             pfUI.api.SkinCheckbox(classIconCB)
             pfUI.api.SkinCheckbox(highlightSelfCB)
@@ -939,6 +953,7 @@ RefreshOptionsWindow = function()
 
     window.lockCB:SetChecked(CL.GetSetting("lockWindow"))
     window.minimapCB:SetChecked(CL.GetSetting("showMinimapButton") ~= false)
+    window.barTooltipCB:SetChecked(CL.GetSetting("showBarTooltips") ~= false)
     if window.matchPfuiCB then
         window.matchPfuiCB:SetChecked(CL.IsMatchPfui())
     end

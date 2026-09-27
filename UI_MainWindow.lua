@@ -368,6 +368,7 @@ end
 
 local function ShowBarTooltip(inst, bar)
     if not bar.guid then return end
+    if CL.GetSetting("showBarTooltips") == false then return end
 
     if inst.frame.mode == "threat" then
         local snapshot = CL.Threat and CL.Threat.GetSnapshot()
