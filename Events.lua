@@ -305,28 +305,22 @@ end
 
 local autoShownMainWindow = false -- see the PLAYER_ENTERING_WORLD handler below
 
--- Some targets (training dummies, on at least this server) never toggle
--- PLAYER_REGEN_DISABLED/ENABLED at all, so an encounter against one
--- would otherwise never end. This is the fallback for that specific
--- case: no combat event of any kind for CL.IDLE_SECONDS force-ends the
--- encounter regardless of the regen flag. Everything else about when an
--- encounter ends is regen state alone - PLAYER_REGEN_ENABLED below ends
--- it immediately, always, no tolerance window, no group check. One
--- continuous engagement (any number of mobs, chained or simultaneous)
--- is one encounter as long as combat never actually drops; the moment
--- it does, that encounter is over, full stop - the next
--- PLAYER_REGEN_DISABLED always starts a new one, never resumes the old
--- one.
+-- Encounter end: PLAYER_REGEN_ENABLED only marks the encounter as
+-- pending-end (pendingEndSince). The OnUpdate below finishes it once
+-- neither the player, any group member, nor any tracked pet has been in
+-- combat for END_DEBOUNCE seconds. Dying, Feign Death or briefly
+-- dropping combat mid-pull therefore no longer splits the fight while
+-- the group is still engaged. A PLAYER_REGEN_DISABLED inside the
+-- debounce cancels the pending end and continues the same encounter.
 --
--- A group-wait (defer finishing until every raid/party member's own
--- combat flag also clears) used to live here, added after debug
--- logging caught a real instance of the player's own regen clearing
--- while 4 raid members were still UnitAffectingCombat()-true. Removed
--- again - GreedMeter (this addon's own reference point) has no such
--- check at all and reportedly never fragments a pull in months of real
--- use, so the theoretical risk isn't worth the stop feeling delayed on
--- every single fight to guard against an edge case that doesn't
--- actually bite in practice.
+-- Some targets (training dummies) never toggle regen at all; the
+-- CL.IDLE_SECONDS fallback in OnUpdate covers those.
+local END_DEBOUNCE = 1.5
+local GROUP_CHECK_INTERVAL = 0.5
+local pendingEndSince = nil
+local nextGroupCheck = 0
+local groupInCombatCached = false
+
 local function IsGrouped()
     return ((GetNumRaidMembers and GetNumRaidMembers()) or 0) > 0
         or ((GetNumPartyMembers and GetNumPartyMembers()) or 0) > 0
@@ -338,26 +332,31 @@ end
 -- else joining/leaving a raid you're already in shouldn't wipe Overall).
 local wasGrouped = IsGrouped()
 
+local function UnitInCombat(unit)
+    local ok, inCombat = pcall(UnitAffectingCombat, unit)
+    return ok and inCombat
+end
+
 -- Checks whether anyone else in the group is still flagged in combat.
 -- On this client, GetNumPartyMembers() has been observed nonzero AT THE
 -- SAME TIME as GetNumRaidMembers() while genuinely in a raid (a real
 -- quirk, seen in the diagnostic log) - so this checks BOTH ranges
 -- whenever they're nonzero rather than assuming they're mutually
 -- exclusive, to avoid missing raid members if partyN is stale.
+-- Pets count too: a Feign Death hunter's pet keeps fighting.
 local function AnyGroupMemberInCombat()
     local raidN = (GetNumRaidMembers and GetNumRaidMembers()) or 0
     local partyN = (GetNumPartyMembers and GetNumPartyMembers()) or 0
     local i
+    if UnitInCombat("pet") then return true end
     if raidN > 0 then
         for i = 1, raidN do
-            local ok, inCombat = pcall(UnitAffectingCombat, "raid" .. i)
-            if ok and inCombat then return true end
+            if UnitInCombat("raid" .. i) or UnitInCombat("raid" .. i .. "pet") then return true end
         end
     end
     if partyN > 0 then
         for i = 1, partyN do
-            local ok, inCombat = pcall(UnitAffectingCombat, "party" .. i)
-            if ok and inCombat then return true end
+            if UnitInCombat("party" .. i) or UnitInCombat("partypet" .. i) then return true end
         end
     end
     return false
@@ -368,6 +367,7 @@ local function FinishEncounter()
     -- TouchActivity above) trims trailing idle time out of the reported
     -- duration, matching GreedMeter's own Parser:OnCombatEnd - see
     -- Aggregator.lua's EndEncounter for why.
+    pendingEndSince = nil
     local finished = CL.Aggregator.EndEncounter(lastEventTime)
     if not finished then return end
 
@@ -446,6 +446,11 @@ f:SetScript("OnEvent", function()
             CL.Aggregator.RestoreState(CombatLedgerDB.liveState)
             if CL.Aggregator.GetCurrent() then
                 TouchActivity()
+                -- No PLAYER_REGEN_ENABLED will arrive if we reloaded
+                -- out of combat - start the end debounce ourselves.
+                if not UnitInCombat("player") then
+                    pendingEndSince = GetTime()
+                end
             end
             if CL.UI and CL.UI.RestoreAllWindows then
                 CL.UI.RestoreAllWindows()
@@ -504,6 +509,7 @@ f:SetScript("OnEvent", function()
     if event == "PLAYER_REGEN_DISABLED" then
         LogRegenDiagnostic("DISABLED")
         TouchActivity()
+        pendingEndSince = nil
         CL.Aggregator.StartEncounter()
         if CL.UI and CL.UI.ApplyAutoShow then
             CL.UI.ApplyAutoShow()
@@ -513,7 +519,10 @@ f:SetScript("OnEvent", function()
 
     if event == "PLAYER_REGEN_ENABLED" then
         LogRegenDiagnostic("ENABLED")
-        FinishEncounter()
+        if CL.Aggregator.GetCurrent() then
+            pendingEndSince = GetTime()
+            nextGroupCheck = 0
+        end
         return
     end
 
@@ -631,6 +640,29 @@ f:SetScript("OnUpdate", function()
         for key, pending in pairs(pendingAuraCasts) do
             if (GetTime() - pending.time) > PENDING_AURA_WINDOW then
                 pendingAuraCasts[key] = nil
+            end
+        end
+    end
+
+    if pendingEndSince then
+        local now = GetTime()
+        if not CL.Aggregator.GetCurrent() then
+            pendingEndSince = nil
+        elseif UnitInCombat("player") then
+            -- Re-entered combat without a REGEN_DISABLED (e.g. restored
+            -- state) - the encounter is live again.
+            pendingEndSince = nil
+        else
+            if now >= nextGroupCheck then
+                nextGroupCheck = now + GROUP_CHECK_INTERVAL
+                groupInCombatCached = AnyGroupMemberInCombat()
+            end
+            if groupInCombatCached then
+                pendingEndSince = now
+            elseif now - pendingEndSince >= END_DEBOUNCE then
+                if CL.debug then CL.LogLine("[REGEN] debounced end - player and group out of combat") end
+                FinishEncounter()
+                return
             end
         end
     end
