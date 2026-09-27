@@ -11,7 +11,7 @@
                 [guid] = {
                     name, class, isPlayer,
                     damageDone  = { total, spells = { [spellId] = {name, school, hits, crits, total, min, max} }, melee = {hits, crits, total, min, max} },
-                    healingDone = { total, overheal, spells = { ... } },
+                    healingDone = { total (effective), raw, overheal, unverified, spells = { ... } },
                     damageTaken = { total, spells = { ... }, melee = { ... } },
                     deaths,
                 },
@@ -823,14 +823,38 @@ local function RecordAvoidance(casterGuid, targetGuid, victimState, isOffhand)
     RecordAvoidanceInto(overall.units, casterGuid, targetGuid, key, isOffhand)
 end
 
-local function RecordHealingInto(units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
+-- Healing totals are EFFECTIVE healing (raw minus estimated overheal), so
+-- bars, rates, spell shares and healing threat all ignore overheal.
+-- raw/overheal/unverified ride alongside; min/max and the per-crit
+-- averages use raw heal size, since that's what the spell actually did.
+-- `unverified` = raw amount whose target health couldn't be read, so
+-- it was counted as fully effective.
+local function AddHeal(t, amount, effective, overheal, unverified)
+    t.total = t.total + effective
+    t.raw = (t.raw or 0) + amount
+    t.overheal = (t.overheal or 0) + overheal
+    if unverified then t.unverified = (t.unverified or 0) + amount end
+end
+
+local function RecordHealHit(entry, amount, effective, overheal, isCrit, unverified)
+    entry.hits = entry.hits + 1
+    AddHeal(entry, amount, effective, overheal, unverified)
+    if isCrit then
+        entry.crits = entry.crits + 1
+        entry.critTotal = (entry.critTotal or 0) + effective
+        entry.critRaw = (entry.critRaw or 0) + amount
+    end
+    if not entry.min or amount < entry.min then entry.min = amount end
+    if not entry.max or amount > entry.max then entry.max = amount end
+end
+
+local function RecordHealingInto(units, casterGuid, targetGuid, spellId, spellName, amount, effective, overheal, isCrit, unverified)
     if not casterGuid then return end
     local attributed = AttributedGuid(casterGuid)
     if not IsTrackedGuid(attributed) then return end
     local u = EnsureUnit(units, attributed)
-    u.healingDone.total = u.healingDone.total + amount
-    u.healingDone.overheal = u.healingDone.overheal + (overheal or 0)
-    RecordHit(EnsureSpellEntry(u.healingDone.spells, spellId, spellName, nil), amount, isCrit)
+    AddHeal(u.healingDone, amount, effective, overheal, unverified)
+    RecordHealHit(EnsureSpellEntry(u.healingDone.spells, spellId, spellName, nil), amount, effective, overheal, isCrit, unverified)
 
     if targetGuid then
         local t = u.healingDone.targets[targetGuid]
@@ -839,14 +863,15 @@ local function RecordHealingInto(units, casterGuid, targetGuid, spellId, spellNa
             t = { name = (tinfo and tinfo.name) or targetGuid, total = 0, hits = 0, overheal = 0, spells = {} }
             u.healingDone.targets[targetGuid] = t
         end
-        t.total = t.total + amount
         t.hits = t.hits + 1
-        t.overheal = t.overheal + (overheal or 0)
-        RecordHit(EnsureSpellEntry(t.spells, spellId, spellName, nil), amount, isCrit)
+        AddHeal(t, amount, effective, overheal, unverified)
+        RecordHealHit(EnsureSpellEntry(t.spells, spellId, spellName, nil), amount, effective, overheal, isCrit, unverified)
     end
 end
 
-local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
+-- amount = raw heal from the event; effective/overheal come from
+-- Events.lua's target-health estimate (verified = health was readable).
+local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount, effective, overheal, isCrit, verified)
     -- Does NOT lazy-start - see RecordCast's comment. Confirmed via
     -- debug log: a priest's routine post-fight Renew tick, healing the
     -- raid back up long after ShouldLazyStart's 3-second phantom-guard
@@ -855,11 +880,12 @@ local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount,
     -- outside of combat (topping off between pulls) - not valid
     -- evidence a fight resumed.
     if not current then return end
-    RecordHealingInto(current.units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
-    RecordHealingInto(overall.units, casterGuid, targetGuid, spellId, spellName, amount, overheal, isCrit)
+    local unverified = not verified
+    RecordHealingInto(current.units, casterGuid, targetGuid, spellId, spellName, amount, effective, overheal, isCrit, unverified)
+    RecordHealingInto(overall.units, casterGuid, targetGuid, spellId, spellName, amount, effective, overheal, isCrit, unverified)
 
     if casterGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
-        RecordSeriesPoint(current, "healing", amount)
+        RecordSeriesPoint(current, "healing", effective)
     end
 end
 
@@ -990,9 +1016,9 @@ local function FakeHealingDone(u, power)
         local isCrit = (math.random(100) <= 15)
         local amount = math.floor(300 * power * (0.8 + math.random() * 0.4))
         if isCrit then amount = math.floor(amount * 1.5) end
-        RecordHit(entry, amount, isCrit)
-        bucket.total = bucket.total + amount
-        bucket.overheal = bucket.overheal + math.floor(amount * 0.15)
+        local overheal = math.floor(amount * 0.15)
+        RecordHealHit(entry, amount, amount - overheal, overheal, isCrit, false)
+        AddHeal(bucket, amount, amount - overheal, overheal, false)
     end
 
     -- Two fake recipients so the breakdown window's "Healed:" list has

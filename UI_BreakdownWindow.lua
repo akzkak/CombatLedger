@@ -208,6 +208,12 @@ local function BuildSpellList(bucket)
                 -- Real cast count (see Aggregator.lua's RecordCast) -
                 -- nil on a spell that never had a cast event tracked.
                 casts = s.casts,
+                -- Healing only (see Aggregator.lua's RecordHealHit) -
+                -- total above is effective healing.
+                raw = s.raw,
+                critRaw = s.critRaw,
+                overheal = s.overheal,
+                unverified = s.unverified,
             })
         end
     end
@@ -612,7 +618,7 @@ end
 -- overall summary for the unit instead of just an empty placeholder -
 -- the panel has plenty of room, no reason to leave it blank until you
 -- click something.
-local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mode, filteredTargetName)
+local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mode, filteredTargetName, bucket)
     if not window then return end
 
     -- Default/no-selection state - only the "specific entry selected"
@@ -643,6 +649,10 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
             row.icon:Hide()
         end
         row:Show()
+    end
+    local function DimLine(label, value, dim)
+        local c = dim and 0.6 or 1
+        Line(label, value, c, c, c)
     end
     local function Header(label)
         idx = idx + 1
@@ -685,6 +695,7 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         Line("Total", FormatNumber(unitTotal or 0))
         Line("Rate", FormatNumber((unitTotal or 0) / (duration or 1)) .. " " .. CL.RateSuffix(mode))
         Line("Duration", string.format("%.1fs", duration or 0))
+        if mode == "healing" then CL.AddOverhealLines(bucket, DimLine) end
 
         local totalHits, totalCrits = 0, 0
         local i
@@ -740,6 +751,7 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         Line("% of Total", string.format("%.0f%%", entry.total / unitTotal * 100))
     end
     Line("Rate", FormatNumber(entry.total / (duration or 1)) .. " " .. CL.RateSuffix(mode))
+    if mode == "healing" then CL.AddOverhealLines(entry, DimLine) end
 
     -- A pure DoT (Curse of Agony) has no direct-hit component, so "Hits"
     -- and the Ticks line below would just repeat the same number under
@@ -797,14 +809,18 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         local critPct = (hits > 0) and (crits / hits * 100) or 0
         local critTotal = entry.critTotal or 0
         local critDmgPct = (entry.total and entry.total > 0) and (critTotal / entry.total * 100) or 0
+        -- Heals average raw heal size (what the spell did), not the
+        -- overheal-reduced effective amount.
+        local sizeTotal = entry.raw or entry.total or 0
+        local sizeCrit = entry.raw and (entry.critRaw or 0) or critTotal
         Line("Crits", string.format("%d (%.0f%%)", crits, critPct))
         if crits > 0 then
-            Line("Crit damage", string.format("%s (%.0f%%)", FormatNumber(critTotal), critDmgPct))
-            Line("Avg crit", FormatNumber(critTotal / crits))
+            Line(entry.raw and "Crit healing" or "Crit damage", string.format("%s (%.0f%%)", FormatNumber(critTotal), critDmgPct))
+            Line("Avg crit", FormatNumber(sizeCrit / crits))
         end
         local nonCritHits = hits - crits
         if nonCritHits > 0 then
-            Line("Avg normal hit", FormatNumber((entry.total - critTotal) / nonCritHits))
+            Line(entry.raw and "Avg normal heal" or "Avg normal hit", FormatNumber((sizeTotal - sizeCrit) / nonCritHits))
         end
     end
 
@@ -1003,7 +1019,7 @@ function BD.Refresh()
     end
 
     RefreshDetailPanel(selectedEntry, list, targets, duration, unitTotal, mode,
-        filteredTarget and filteredTarget.name)
+        filteredTarget and filteredTarget.name, bucket)
 
     -- "All Enemies" sits at slot 1 (once there's more than one target to
     -- pick from), bumping the actual target rows down one slot and one

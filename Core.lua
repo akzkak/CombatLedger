@@ -805,6 +805,21 @@ function CL.FormatNumber(n)
     return tostring(math.floor(n))
 end
 
+-- Overheal/unverified lines for any healing bucket or spell entry
+-- (see Aggregator.lua's AddHeal), shared by the main tooltip and the
+-- breakdown panel. addLine(label, value, dim). Saves from before
+-- overheal tracking have no `raw` and show nothing.
+function CL.AddOverhealLines(t, addLine)
+    local raw = t and t.raw
+    if not raw or raw <= 0 then return end
+    local over = t.overheal or 0
+    addLine("Overheal (est.)", string.format("%s (%.0f%%)", CL.FormatNumber(over), over / raw * 100))
+    local unverified = t.unverified or 0
+    if unverified > 0 then
+        addLine("Unverified", string.format("%s (%.0f%%)", CL.FormatNumber(unverified), unverified / raw * 100), true)
+    end
+end
+
 -- Appearance-changed pub/sub - each UI file registers a listener that
 -- re-applies font/texture/bar-height/number-format to its own pooled
 -- bars; Options fires this once after any change so every open window

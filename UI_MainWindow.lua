@@ -381,6 +381,13 @@ local function ShowBarTooltip(inst, bar)
     end
     GameTooltip:AddDoubleLine("Duration", string.format("%.1fs", duration), 1, 1, 1, 1, 1, 1)
 
+    if mode == "healing" and u.healingDone then
+        CL.AddOverhealLines(u.healingDone, function(label, value, dim)
+            local c = dim and 0.6 or 1
+            GameTooltip:AddDoubleLine(label, value, c, c, c, c, c, c)
+        end)
+    end
+
     if mode == "damage" or mode == "taken" then
         local bucket = (mode == "taken") and u.damageTaken or u.damageDone
         if bucket then

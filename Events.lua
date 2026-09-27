@@ -163,6 +163,25 @@ local function HandleSpellDamage(isSelf, targetGuid, casterGuid, spellId, amount
     end
 end
 
+-- Nampower's heal event carries no overheal, so it's estimated from the
+-- target's missing health at event time (same approach as Skada):
+-- effective = min(heal, maxHp - hp). SuperWoW lets UnitHealth take the
+-- raw GUID. Outside the group, vanilla reports health as a 0-100
+-- percentage (max 100), which can't be compared to a heal amount - those
+-- heals count as fully effective and are flagged unverified.
+local function EstimateHeal(targetGuid, amount)
+    if not targetGuid or not UnitHealth or not UnitHealthMax then return amount, 0, false end
+    local okHp, hp = pcall(UnitHealth, targetGuid)
+    local okMax, maxHp = pcall(UnitHealthMax, targetGuid)
+    hp, maxHp = okHp and tonumber(hp), okMax and tonumber(maxHp)
+    if not hp or not maxHp or maxHp <= 0 then return amount, 0, false, hp, maxHp end
+    if maxHp == 100 and not CL.GuidCache.IsTracked(targetGuid) then return amount, 0, false, hp, maxHp end
+    local deficit = maxHp - hp
+    if deficit < 0 then deficit = 0 end
+    local effective = (amount < deficit) and amount or deficit
+    return effective, amount - effective, true, hp, maxHp
+end
+
 local function HandleSpellHeal(targetGuid, casterGuid, spellId, amount, critFlag, periodicFlag)
     amount = tonumber(amount) or 0
     spellId = tonumber(spellId)
@@ -170,14 +189,19 @@ local function HandleSpellHeal(targetGuid, casterGuid, spellId, amount, critFlag
     local isCrit = (critFlag == "1" or critFlag == 1 or critFlag == true)
     local relevant = IsRelevant(casterGuid, targetGuid)
     if relevant then TouchActivity() end -- see HandleAutoAttack's comment - relevance-gated, not blanket
+    local effective, overheal, verified, hp, maxHp
+    if relevant and amount > 0 then
+        effective, overheal, verified, hp, maxHp = EstimateHeal(targetGuid, amount)
+    end
     if CL.debug then
         CL.LogLine(string.format(
-            "%s[SPELL_HEAL] tgt=%s caster=%s spell=%s(%s) heal=%d crit=%s periodic=%s",
+            "%s[SPELL_HEAL] tgt=%s caster=%s spell=%s(%s) heal=%d crit=%s periodic=%s hp=%s/%s eff=%s over=%s verified=%s",
             relevant and "" or "[FILTERED] ", tostring(targetGuid), tostring(casterGuid), tostring(name), tostring(spellId),
-            amount, tostring(critFlag), tostring(periodicFlag)))
+            amount, tostring(critFlag), tostring(periodicFlag), tostring(hp), tostring(maxHp),
+            tostring(effective), tostring(overheal), tostring(verified)))
     end
     if relevant and amount > 0 then
-        CL.Aggregator.RecordHealing(casterGuid, targetGuid, spellId, name, amount, 0, isCrit)
+        CL.Aggregator.RecordHealing(casterGuid, targetGuid, spellId, name, amount, effective, overheal, isCrit, verified)
     end
 end
 
