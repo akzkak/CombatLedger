@@ -15,9 +15,10 @@ local CL = CombatLedger
 local OPT = {}
 CL.UIOptions = OPT
 
--- WINDOW_HEIGHT fits the Advanced tab with every window row in use
--- (MAX_WINDOW_ROWS rows of three lines each) plus padding.
-local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 724 -- +24 over the prior ceiling for the "Ask before clearing" row (join-party clear is now two checkboxes, not one)
+-- WINDOW_HEIGHT fits the Advanced tab (Announce, Data, Clear Overall and
+-- Windows sections) with every window row in use (MAX_WINDOW_ROWS rows of
+-- three lines each) plus padding.
+local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 792 -- +24 over the prior ceiling for the "Ask before clearing" row (join-party clear is now two checkboxes, not one)
 local MAX_WINDOW_ROWS = 4 -- most people won't run more than 2-3 extra meter windows at once
 local ROW_HEIGHT = 24
 
@@ -608,6 +609,12 @@ local function CreateWindow()
     end)
     f.announcePullsCB = announcePullsCB
 
+    AddDivider(pageAdvanced)
+    local dataHeader = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    y = NextY()
+    dataHeader:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    dataHeader:SetText("|cffffd700Data|r")
+
     -- Same as Skada's "Merge pets into owners". Applies to data recorded
     -- from now on (existing fights keep whatever attribution they had).
     local mergePetsLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -673,6 +680,12 @@ local function CreateWindow()
 
     -- Automatic Overall resets (Events.lua): Off / Ask / Always each.
     -- Current Fight and History are never touched.
+    AddDivider(pageAdvanced)
+    local resetHeader = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    y = NextY()
+    resetHeader:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    resetHeader:SetText("|cffffd700Clear Overall|r")
+
     local function CreateResetRule(labelText, settingKey)
         local label = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         y = NextY()
@@ -696,9 +709,9 @@ local function CreateWindow()
         return btn
     end
     f.resetRuleBtns = {
-        CreateResetRule("Clear Overall on joining group", "clearOnJoinPartyMode"),
-        CreateResetRule("Clear Overall on leaving group", "clearOnLeavePartyMode"),
-        CreateResetRule("Clear Overall on entering instance", "clearOnEnterInstanceMode"),
+        CreateResetRule("When joining a group", "clearOnJoinPartyMode"),
+        CreateResetRule("When leaving a group", "clearOnLeavePartyMode"),
+        CreateResetRule("When entering an instance", "clearOnEnterInstanceMode"),
     }
 
     -- Windows list: one row per meter window (from CL.UI.GetWindowList),
