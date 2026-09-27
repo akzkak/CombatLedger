@@ -277,9 +277,12 @@ end
 local lastFinished = nil -- frozen snapshot of the previous fight, shown as "Current Fight" between pulls
 local lastFinishedTime = nil -- GetTime() when lastFinished was set - see ShouldLazyStart below
 
+local bossTagCache = {} -- [enemyGuid] = true/false, see IsBossTaggedEnemyCached - cleared per encounter
+
 local function StartEncounter()
     if current then return end
     current = NewEncounter()
+    bossTagCache = {}
     lastFinished = nil -- a new fight is live - stop showing the frozen previous one
     if CL.debug then
         CL.Print("Encounter started.")
@@ -543,6 +546,21 @@ local function IsBossTaggedEnemy(enemyGuid)
     return isBoss
 end
 
+-- A mob's classification/level never changes, so each enemy is checked
+-- once per encounter instead of on every hit until a boss shows up (a
+-- long trash pull used to run two pcall'd unit lookups per event).
+-- Unlike a timed scan, the first hit on each new enemy is still checked
+-- immediately, so pull attribution stays exact.
+local function IsBossTaggedEnemyCached(enemyGuid)
+    if not enemyGuid then return false end
+    local cached = bossTagCache[enemyGuid]
+    if cached == nil then
+        cached = IsBossTaggedEnemy(enemyGuid)
+        bossTagCache[enemyGuid] = cached
+    end
+    return cached
+end
+
 -- Which melee sub-entry a dmg=0-or-not auto-attack swing belongs in -
 -- shared by RecordDamageInto and RecordAvoidanceInto so main-hand/
 -- off-hand/pet routing stays in exactly one place.
@@ -691,10 +709,10 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
 
     -- Pull attribution: whoever's action is the first damage event
     -- against/from a boss-tagged enemy this encounter "pulled" it - set
-    -- once. Stays nil (and keeps re-checking each call) until a
-    -- boss-tagged hit actually happens, so a trash-only encounter never
-    -- claims this and never prints - see CL.GetSetting("announcePulls").
-    if not current.pullBy and casterGuid and IsBossTaggedEnemy(EnemyGuidFor(casterGuid, targetGuid)) then
+    -- once. Stays nil until a boss-tagged hit actually happens, so a
+    -- trash-only encounter never claims this and never prints - see
+    -- CL.GetSetting("announcePulls").
+    if not current.pullBy and casterGuid and IsBossTaggedEnemyCached(EnemyGuidFor(casterGuid, targetGuid)) then
         local info = CL.GuidCache and CL.GuidCache.Resolve(casterGuid)
         current.pullBy = { name = (info and info.name) or casterGuid, label = spellName or "Auto Attack" }
         if CL.GetSetting("announcePulls") ~= false then
