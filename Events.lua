@@ -458,7 +458,10 @@ local function FinishEncounter()
 
     -- Skip saving near-nothing encounters (a stray hit that barely
     -- registered before the idle timeout) - not worth a history slot.
-    if finished.duration > 1 and CL.TableCount(finished.units) > 0 and CL.History then
+    -- "Remember boss fights only" (Options) additionally skips anything
+    -- that never hit a boss-tagged enemy (Aggregator's isBoss).
+    local bossOnly = CL.GetSetting("historyBossOnly") and not finished.isBoss
+    if finished.duration > 1 and CL.TableCount(finished.units) > 0 and not bossOnly and CL.History then
         CL.History.SaveEncounter(finished)
     end
 

@@ -414,6 +414,64 @@ end
 -- /reload would silently wipe the in-progress fight and the whole
 -- session's Overall totals back to zero, since current/overall only
 -- exist as Lua locals otherwise.
+-- Adds src's numbers into dst, recursively (spells, melee entries,
+-- avoided/mit/spellMisses sub-tables all nest the same way). min/max
+-- combine as min/max; `school` is an id, not a count, so it's kept;
+-- strings (names) keep dst's value.
+local NON_ADDITIVE = { school = true }
+local function MergeStats(dst, src)
+    local k, v
+    for k, v in pairs(src) do
+        if type(v) == "number" then
+            if k == "min" then
+                dst.min = dst.min and math.min(dst.min, v) or v
+            elseif k == "max" then
+                dst.max = dst.max and math.max(dst.max, v) or v
+            elseif NON_ADDITIVE[k] then
+                if dst[k] == nil then dst[k] = v end
+            else
+                dst[k] = (dst[k] or 0) + v
+            end
+        elseif type(v) == "table" then
+            if type(dst[k]) ~= "table" then dst[k] = {} end
+            MergeStats(dst[k], v)
+        elseif dst[k] == nil then
+            dst[k] = v
+        end
+    end
+end
+
+local TARGET_BUCKETS = { "damageDone", "damageTaken", "healingDone", "cleanses", "debuffsGiven", "interrupts" }
+
+-- Re-keys every per-target table of an encounter by name, merging
+-- same-named entries (see TargetKey) - run when a fight is saved to
+-- History and on an Overall restored from an older, GUID-keyed save.
+-- Totals are unchanged; only same-named mobs stop being separate rows.
+local function CompactTargets(enc)
+    if not enc or not enc.units then return end
+    local guid, u
+    for guid, u in pairs(enc.units) do
+        u.pendingCasts = nil -- stash for a DoT whose first tick never landed - meaningless once saved
+        local i
+        for i = 1, table.getn(TARGET_BUCKETS) do
+            local bucket = u[TARGET_BUCKETS[i]]
+            if bucket and bucket.targets then
+                local merged = {}
+                local key, t
+                for key, t in pairs(bucket.targets) do
+                    local name = t.name or key
+                    if merged[name] then
+                        MergeStats(merged[name], t)
+                    else
+                        merged[name] = t
+                    end
+                end
+                bucket.targets = merged
+            end
+        end
+    end
+end
+
 local function SerializeState()
     return { current = current, overall = overall }
 end
@@ -450,6 +508,7 @@ local function RestoreState(saved)
     if saved.overall then
         overall = saved.overall
         BackfillEncounter(overall)
+        CompactTargets(overall)
     end
     if saved.current and saved.current.startTimeReal
         and (time() - saved.current.startTimeReal) < RESTORE_STALE_SECONDS
@@ -617,17 +676,29 @@ end
 -- entry. Same shape as a damage bucket (spells/melee/offhand/pet
 -- variants) so clicking it in the UI reuses the exact same per-ability
 -- breakdown code as the unit-wide view, just scoped to this one unit.
-local function EnsureTargetEntry(targets, guid)
-    local t = targets[guid]
+--
+-- Keyed by GUID in a live fight (two same-named adds stay apart), but by
+-- NAME in Overall (units == overall.units): a session of trash would
+-- otherwise grow one full breakdown per mob GUID ever hit, all of it
+-- saved to disk on logout. Same idea as Skada's name-keyed targets.
+local function TargetKey(units, guid)
+    local info = CL.GuidCache and CL.GuidCache.Resolve(guid)
+    local name = info and info.name
+    if name and units == overall.units then return name, name end
+    return guid, name or guid
+end
+
+local function EnsureTargetEntry(units, targets, guid)
+    local key, name = TargetKey(units, guid)
+    local t = targets[key]
     if not t then
-        local info = CL.GuidCache and CL.GuidCache.Resolve(guid)
         t = {
-            name = (info and info.name) or guid,
+            name = name,
             total = 0, hits = 0, spells = {},
             melee = NewMeleeEntry(), offhand = NewMeleeEntry(),
             petMelee = NewMeleeEntry(), petOffhand = NewMeleeEntry(),
         }
-        targets[guid] = t
+        targets[key] = t
     end
     return t
 end
@@ -661,7 +732,7 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
             end
 
             if targetGuid then
-                local t = EnsureTargetEntry(u.damageDone.targets, targetGuid)
+                local t = EnsureTargetEntry(units, u.damageDone.targets, targetGuid)
                 t.total = t.total + amount
                 t.hits = t.hits + 1
                 ApplyMitigation(t, mit)
@@ -695,7 +766,7 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
             -- damageDone.targets) - the breakdown window shows this as
             -- "Attackers:" instead of "Targets:" for this mode.
             if casterGuid then
-                local s = EnsureTargetEntry(u.damageTaken.targets, casterGuid)
+                local s = EnsureTargetEntry(units, u.damageTaken.targets, casterGuid)
                 s.total = s.total + amount
                 s.hits = s.hits + 1
                 ApplyMitigation(s, mit)
@@ -727,6 +798,7 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
     if not current.pullBy and casterGuid and IsBossTaggedEnemyCached(EnemyGuidFor(casterGuid, targetGuid)) then
         local info = CL.GuidCache and CL.GuidCache.Resolve(casterGuid)
         current.pullBy = { name = (info and info.name) or casterGuid, label = spellName or "Auto Attack" }
+        current.isBoss = true -- see History's "Remember boss fights only"
         if CL.GetSetting("announcePulls") ~= false then
             CL.Print("Pull: " .. current.pullBy.name .. " (" .. current.pullBy.label .. ")")
         end
@@ -944,7 +1016,7 @@ local function RecordSpellMissInto(units, casterGuid, targetGuid, spellId, key)
             local u = EnsureUnit(units, attributed)
             BumpSpellMiss(u.damageDone, spellId, key)
             if targetGuid then
-                BumpSpellMiss(EnsureTargetEntry(u.damageDone.targets, targetGuid), spellId, key)
+                BumpSpellMiss(EnsureTargetEntry(units, u.damageDone.targets, targetGuid), spellId, key)
             end
         end
     end
@@ -954,7 +1026,7 @@ local function RecordSpellMissInto(units, casterGuid, targetGuid, spellId, key)
             local u = EnsureUnit(units, attributed)
             BumpSpellMiss(u.damageTaken, spellId, key)
             if casterGuid then
-                BumpSpellMiss(EnsureTargetEntry(u.damageTaken.targets, casterGuid), spellId, key)
+                BumpSpellMiss(EnsureTargetEntry(units, u.damageTaken.targets, casterGuid), spellId, key)
             end
         end
     end
@@ -983,11 +1055,11 @@ local function RecordHealingInto(units, casterGuid, targetGuid, spellId, spellNa
     RecordHealHit(EnsureSpellEntry(u.healingDone.spells, spellId, spellName, nil), amount, effective, overheal, isCrit, unverified)
 
     if targetGuid then
-        local t = u.healingDone.targets[targetGuid]
+        local key, name = TargetKey(units, targetGuid)
+        local t = u.healingDone.targets[key]
         if not t then
-            local tinfo = CL.GuidCache and CL.GuidCache.Resolve(targetGuid)
-            t = { name = (tinfo and tinfo.name) or targetGuid, total = 0, hits = 0, overheal = 0, spells = {} }
-            u.healingDone.targets[targetGuid] = t
+            t = { name = name, total = 0, hits = 0, overheal = 0, spells = {} }
+            u.healingDone.targets[key] = t
         end
         t.hits = t.hits + 1
         AddHeal(t, amount, effective, overheal, unverified)
@@ -1034,11 +1106,11 @@ local function RecordCountEventInto(units, bucketKey, casterGuid, targetGuid, sp
     RecordHit(EnsureSpellEntry(bucket.spells, spellId, spellName, nil), 1, false)
 
     if targetGuid then
-        local t = bucket.targets[targetGuid]
+        local key, name = TargetKey(units, targetGuid)
+        local t = bucket.targets[key]
         if not t then
-            local tinfo = CL.GuidCache and CL.GuidCache.Resolve(targetGuid)
-            t = { name = (tinfo and tinfo.name) or targetGuid, total = 0, hits = 0, spells = {} }
-            bucket.targets[targetGuid] = t
+            t = { name = name, total = 0, hits = 0, spells = {} }
+            bucket.targets[key] = t
         end
         t.total = t.total + 1
         t.hits = t.hits + 1
@@ -1276,6 +1348,7 @@ CL.Aggregator = {
     GetOverall = GetOverall,
     GetOverallDuration = GetOverallDuration,
     ResetOverall = ResetOverall,
+    CompactTargets = CompactTargets,
     GetDataVersion = function() return dataVersion end,
     GetDeathRecap = GetDeathRecap,
     SnapshotDeathRecap = SnapshotDeathRecap, -- exposed for /cl testdeath - doesn't touch the real death counter

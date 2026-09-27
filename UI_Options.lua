@@ -21,7 +21,7 @@ CL.UIOptions = OPT
 -- RefreshOptionsWindow reflows resetPosBtn up to sit right after
 -- however many windows actually exist, so this is a ceiling, not what
 -- most people will actually see below their last row.
-local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 652 -- +24 over the prior ceiling for the "Ask before clearing" row (join-party clear is now two checkboxes, not one)
+local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 700 -- +24 over the prior ceiling for the "Ask before clearing" row (join-party clear is now two checkboxes, not one)
 local MAX_WINDOW_ROWS = 4 -- most people won't run more than 2-3 extra meter windows at once
 local ROW_HEIGHT = 24
 
@@ -641,6 +641,40 @@ local function CreateWindow()
     end)
     f.mergePetsCB = mergePetsCB
 
+    -- Skada's "Saved fights" / "Remember boss fights only" - both bound
+    -- how much History (saved to disk per character) can grow.
+    local savedFightsLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    savedFightsLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    savedFightsLabel:SetText("Saved fights")
+    local savedFightsStepper = CreateStepper(pageAdvanced, 90)
+    savedFightsStepper:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 1)
+    local function StepSavedFights(delta)
+        local v = (CL.GetSetting("maxEncounters") or CL.MAX_SAVED_FIGHTS) + delta
+        if v < CL.MIN_SAVED_FIGHTS then v = CL.MIN_SAVED_FIGHTS end
+        if v > CL.MAX_SAVED_FIGHTS then v = CL.MAX_SAVED_FIGHTS end
+        CL.SetSetting("maxEncounters", v)
+        if CL.History then CL.History.TrimHistory() end
+        if CL.UIHistory and CL.UIHistory.Refresh then CL.UIHistory.Refresh() end
+        RefreshOptionsWindow()
+    end
+    savedFightsStepper.minus:SetScript("OnClick", function() StepSavedFights(-CL.SAVED_FIGHTS_STEP) end)
+    savedFightsStepper.plus:SetScript("OnClick", function() StepSavedFights(CL.SAVED_FIGHTS_STEP) end)
+    f.savedFightsStepper = savedFightsStepper
+
+    local bossOnlyLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    bossOnlyLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    bossOnlyLabel:SetText("Remember boss fights only")
+    local bossOnlyCB = CreateFrame("CheckButton", "CombatLedgerBossOnlyCB", pageAdvanced, "UICheckButtonTemplate")
+    bossOnlyCB:SetWidth(20)
+    bossOnlyCB:SetHeight(20)
+    bossOnlyCB:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 3)
+    bossOnlyCB:SetScript("OnClick", function()
+        CL.SetSetting("historyBossOnly", (this:GetChecked() == 1))
+    end)
+    f.bossOnlyCB = bossOnlyCB
+
     local testLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     y = NextY()
     testLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
@@ -823,6 +857,7 @@ local function CreateWindow()
             pfUI.api.SkinCheckbox(clearOnJoinAskCB)
             pfUI.api.SkinCheckbox(announcePullsCB)
             pfUI.api.SkinCheckbox(mergePetsCB)
+            pfUI.api.SkinCheckbox(bossOnlyCB)
             if matchPfuiCB then pfUI.api.SkinCheckbox(matchPfuiCB) end
             pfUI.api.SkinButton(textureBtn)
             pfUI.api.SkinButton(fontBtn)
@@ -850,6 +885,8 @@ local function CreateWindow()
             pfUI.api.SkinButton(announceChanBtn)
             pfUI.api.SkinButton(announceCountStepper.minus)
             pfUI.api.SkinButton(announceCountStepper.plus)
+            pfUI.api.SkinButton(savedFightsStepper.minus)
+            pfUI.api.SkinButton(savedFightsStepper.plus)
         end)
         f:SetBackdropBorderColor(themeR, themeG, themeB, 1)
     end
@@ -914,6 +951,8 @@ RefreshOptionsWindow = function()
     window.announceCountStepper.value:SetText(tostring(CL.GetSetting("announceCount") or 5))
     window.announcePullsCB:SetChecked(CL.GetSetting("announcePulls") ~= false)
     window.mergePetsCB:SetChecked(CL.GetSetting("mergePets") ~= false)
+    window.savedFightsStepper.value:SetText(tostring(CL.GetSetting("maxEncounters") or CL.MAX_SAVED_FIGHTS))
+    window.bossOnlyCB:SetChecked(CL.GetSetting("historyBossOnly") == true)
 
     window.testCB:SetChecked(CL.testMode)
     local clearMode = CL.GetSetting("clearOnJoinPartyMode")

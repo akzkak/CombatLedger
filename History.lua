@@ -1,6 +1,6 @@
 --[[
     History - save/trim/delete for CombatLedgerDB.encountersByChar[key].
-    Most-recent-first, capped at CL.MAX_ENCOUNTERS (trim-oldest) - PER
+    Most-recent-first, capped at Options' "Saved fights" (trim-oldest) - PER
     CHARACTER, since CombatLedgerDB itself is account-wide (plain
     SavedVariables, not SavedVariablesPerCharacter - see the .toc) and a
     flat shared list meant every alt on the account saw every other alt's
@@ -89,6 +89,17 @@ local function ComputeLabel(encounter)
     return encounter.zone or "Unknown"
 end
 
+-- Drops the oldest fights beyond Options' "Saved fights" - also called
+-- straight from Options when that number is lowered.
+local function TrimHistory()
+    local key = EnsureEncountersTable()
+    local list = CombatLedgerDB.encountersByChar[key]
+    local cap = CL.GetSetting("maxEncounters") or CL.MAX_SAVED_FIGHTS
+    while table.getn(list) > cap do
+        table.remove(list, table.getn(list))
+    end
+end
+
 local function SaveEncounter(encounter)
     if not encounter then return end
     local key = EnsureEncountersTable()
@@ -99,16 +110,29 @@ local function SaveEncounter(encounter)
     end
     encounter.mobTally = nil -- label-only scratch data, not worth persisting
     encounter.mobHealth = nil -- label-only scratch data, not worth persisting
+    -- Merge same-named mobs' per-target breakdowns (a trash pull can hit
+    -- dozens of GUIDs) - see Aggregator.lua's CompactTargets.
+    CL.Aggregator.CompactTargets(encounter)
 
     table.insert(list, 1, encounter)
-    while table.getn(list) > CL.MAX_ENCOUNTERS do
-        table.remove(list, table.getn(list))
-    end
+    TrimHistory()
 end
+
+-- Fights saved before target compaction existed are still GUID-keyed -
+-- compact them once per session, the first time History is read.
+local compactedOldSaves = false
 
 local function GetHistory()
     local key = EnsureEncountersTable()
-    return CombatLedgerDB.encountersByChar[key]
+    local list = CombatLedgerDB.encountersByChar[key]
+    if not compactedOldSaves then
+        compactedOldSaves = true
+        local i
+        for i = 1, table.getn(list) do
+            CL.Aggregator.CompactTargets(list[i])
+        end
+    end
+    return list
 end
 
 local function DeleteEncounter(index)
@@ -126,4 +150,5 @@ CL.History = {
     GetHistory = GetHistory,
     DeleteEncounter = DeleteEncounter,
     ClearHistory = ClearHistory,
+    TrimHistory = TrimHistory,
 }

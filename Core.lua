@@ -76,6 +76,8 @@ CL.defaultSettings = {
     clearOnJoinPartyMode = "off", -- "off" / "always" / "ask" - auto-resets (or offers to reset) the Overall segment the moment you go from solo to grouped (party or raid) - see Events.lua's group-change handler
 
     announcePulls = true, -- "Pull: X (spell)" chat print at the start of a boss encounter (not regular elite trash) - see Aggregator.lua's IsBossTaggedEnemy
+    maxEncounters = 50, -- Options' "Saved fights": history kept per character, oldest dropped first (Skada's "Saved fights")
+    historyBossOnly = false, -- Options' "Remember boss fights only": only boss pulls are saved to History (Skada's option of the same name)
     mergePets = true, -- pets roll up into their owner's bar in every meter mode (Skada's "Merge pets into owners"); off = pets get their own rows. Threat always keeps pets separate - see Threat.lua
 }
 
@@ -976,7 +978,9 @@ function CL.ResolveAnnounceChannel()
     return string.upper(key)
 end
 
-CL.MAX_ENCOUNTERS = 50 -- same trim-oldest cap pattern as LootLedger's MAX_HISTORY_ENTRIES
+-- Bounds for Options' "Saved fights" (setting maxEncounters) - see
+-- History.lua's trim-oldest cap.
+CL.MIN_SAVED_FIGHTS, CL.MAX_SAVED_FIGHTS, CL.SAVED_FIGHTS_STEP = 5, 50, 5
 
 function CL.Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cff" .. CL.ACCENT_HEX .. "CombatLedger:|r " .. msg)
