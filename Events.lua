@@ -340,10 +340,7 @@ local autoShownMainWindow = false -- see the PLAYER_ENTERING_WORLD handler below
 -- Some targets (training dummies) never toggle regen at all; the
 -- CL.IDLE_SECONDS fallback in OnUpdate covers those.
 local END_DEBOUNCE = 1.5
-local GROUP_CHECK_INTERVAL = 0.5
 local pendingEndSince = nil
-local nextGroupCheck = 0
-local groupInCombatCached = false
 
 local function IsGrouped()
     return ((GetNumRaidMembers and GetNumRaidMembers()) or 0) > 0
@@ -356,35 +353,8 @@ end
 -- else joining/leaving a raid you're already in shouldn't wipe Overall).
 local wasGrouped = IsGrouped()
 
-local function UnitInCombat(unit)
-    local ok, inCombat = pcall(UnitAffectingCombat, unit)
-    return ok and inCombat
-end
-
--- Checks whether anyone else in the group is still flagged in combat.
--- On this client, GetNumPartyMembers() has been observed nonzero AT THE
--- SAME TIME as GetNumRaidMembers() while genuinely in a raid (a real
--- quirk, seen in the diagnostic log) - so this checks BOTH ranges
--- whenever they're nonzero rather than assuming they're mutually
--- exclusive, to avoid missing raid members if partyN is stale.
--- Pets count too: a Feign Death hunter's pet keeps fighting.
-local function AnyGroupMemberInCombat()
-    local raidN = (GetNumRaidMembers and GetNumRaidMembers()) or 0
-    local partyN = (GetNumPartyMembers and GetNumPartyMembers()) or 0
-    local i
-    if UnitInCombat("pet") then return true end
-    if raidN > 0 then
-        for i = 1, raidN do
-            if UnitInCombat("raid" .. i) or UnitInCombat("raid" .. i .. "pet") then return true end
-        end
-    end
-    if partyN > 0 then
-        for i = 1, partyN do
-            if UnitInCombat("party" .. i) or UnitInCombat("partypet" .. i) then return true end
-        end
-    end
-    return false
-end
+local UnitInCombat = CL.GuidCache.UnitInCombat
+local AnyGroupMemberInCombat = CL.GuidCache.AnyGroupMemberInCombat -- cached ~0.25s, see GuidCache.lua
 
 local function FinishEncounter()
     -- lastEventTime (touched by every relevant combat event - see
@@ -545,7 +515,6 @@ f:SetScript("OnEvent", function()
         LogRegenDiagnostic("ENABLED")
         if CL.Aggregator.GetCurrent() then
             pendingEndSince = GetTime()
-            nextGroupCheck = 0
         end
         return
     end
@@ -668,6 +637,18 @@ f:SetScript("OnUpdate", function()
         end
     end
 
+    -- An encounter can be live while the player was never flagged in
+    -- combat (a heal/dispel/damage on a fighting groupmate lazy-started
+    -- it - see Aggregator.lua's IsGroupFighting), so no REGEN_ENABLED
+    -- will ever arm the end. Arm it here once the group is seen
+    -- fighting; it then closes like any other pull. Not armed when the
+    -- group isn't fighting either, so a solo training-dummy fight keeps
+    -- relying on the idle timeout below.
+    if not pendingEndSince and CL.Aggregator.GetCurrent() and not UnitInCombat("player")
+        and AnyGroupMemberInCombat() then
+        pendingEndSince = GetTime()
+    end
+
     if pendingEndSince then
         local now = GetTime()
         if not CL.Aggregator.GetCurrent() then
@@ -677,11 +658,7 @@ f:SetScript("OnUpdate", function()
             -- state) - the encounter is live again.
             pendingEndSince = nil
         else
-            if now >= nextGroupCheck then
-                nextGroupCheck = now + GROUP_CHECK_INTERVAL
-                groupInCombatCached = AnyGroupMemberInCombat()
-            end
-            if groupInCombatCached then
+            if AnyGroupMemberInCombat() then
                 pendingEndSince = now
             elseif now - pendingEndSince >= END_DEBOUNCE then
                 if CL.debug then CL.LogLine("[REGEN] debounced end - player and group out of combat") end

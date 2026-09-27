@@ -169,7 +169,51 @@ local function GetOwner(guid)
     return petOwner[guid]
 end
 
+local function UnitInCombat(unit)
+    local ok, inCombat = pcall(UnitAffectingCombat, unit)
+    return ok and inCombat and true or false
+end
+
+-- Is any group member or tracked pet flagged in combat? (In a raid the
+-- player's own raidN slot is included - harmless, callers only ask
+-- once the player is known to be out of combat or don't care.)
+-- Both raid and party ranges are scanned when nonzero - on this client
+-- GetNumPartyMembers() can be nonzero while in a raid. Pets count: a
+-- Feign Death hunter's pet keeps fighting. Cached briefly since heal/
+-- dispel lazy-start (Aggregator.lua) can ask on every event, and a raid
+-- scan is up to 80 unit checks.
+local GROUP_COMBAT_CACHE_SECONDS = 0.25
+local groupCombatCheckedAt = nil
+local groupCombatCached = false
+
+local function AnyGroupMemberInCombat()
+    local now = GetTime()
+    if groupCombatCheckedAt and now - groupCombatCheckedAt < GROUP_COMBAT_CACHE_SECONDS then
+        return groupCombatCached
+    end
+    groupCombatCheckedAt = now
+
+    local raidN = (GetNumRaidMembers and GetNumRaidMembers()) or 0
+    local partyN = (GetNumPartyMembers and GetNumPartyMembers()) or 0
+    local result = UnitInCombat("pet")
+    local i
+    if not result and raidN > 0 then
+        for i = 1, raidN do
+            if UnitInCombat("raid" .. i) or UnitInCombat("raid" .. i .. "pet") then result = true break end
+        end
+    end
+    if not result and partyN > 0 then
+        for i = 1, partyN do
+            if UnitInCombat("party" .. i) or UnitInCombat("partypet" .. i) then result = true break end
+        end
+    end
+    groupCombatCached = result
+    return result
+end
+
 CL.GuidCache = {
+    UnitInCombat = UnitInCombat,
+    AnyGroupMemberInCombat = AnyGroupMemberInCombat,
     Resolve = Resolve,
     Purge = Purge,
     CleanupStale = CleanupStale,

@@ -310,33 +310,28 @@ end
 -- burn, 334 of its 1044 total) every single time - the encounter's
 -- FIRST event is exactly the one this guard can't afford to reject.
 --
--- Checks the PLAYER's own combat flag specifically, NOT the whole
--- group's - used to check raid/party members too, which reintroduced
--- the exact bug this guard exists to prevent: your own fight ends
--- (current freezes into lastFinished), but a groupmate is still
--- fighting, so their trailing damage/heal event still passed the
--- "someone's in combat" check and restarted a blank encounter right
--- on top of your just-finished result. GreedMeter (this addon's own
--- reference point) ties recording to the player's own personal combat
--- state exactly like this, not the raid's - matching that.
+-- An encounter only ends once the player AND the whole group (pets
+-- included) are out of combat (see Events.lua's debounced end), so a
+-- groupmate still being in combat right after an end means a genuinely
+-- new pull, not a trailing event from the old one.
 local function IsPlayerInCombat()
     local ok, playerCombat = pcall(UnitAffectingCombat, "player")
     return ok and playerCombat and true or false
 end
 
--- The actual guard every Record*'s lazy "if not current then
--- StartEncounter()" uses (see above) - combines both fixes instead of
--- picking one at the other's expense. IsPlayerInCombat() alone always
--- passes; the phantom-encounter risk only ever came from a stray
--- TRAILING event shortly after a real fight just ended, not from a
--- genuine fresh pull. So: allow immediately if the player's combat flag
--- already agrees, OR if it's been a while (no encounter recently ended,
--- or long enough since one did) - only refuse in the narrow window
--- right after lastFinished was set, where a still-unflagged hit is far
--- more likely a trailing tick than a real new pull.
+local function IsGroupFighting()
+    return IsPlayerInCombat() or (CL.GuidCache and CL.GuidCache.AnyGroupMemberInCombat())
+end
+
+-- The guard every damage-style Record*'s lazy "if not current then
+-- StartEncounter()" uses. Allow when the player or group is fighting,
+-- or when it's been a while since the last end (training dummies may
+-- never flag combat at all); only refuse in the narrow window right
+-- after an end, where an unflagged hit is far more likely a trailing
+-- tick than a real new pull.
 local PHANTOM_GUARD_WINDOW = 3 -- seconds after a fight ends where an unflagged hit is treated as a trailing event, not a new pull
 local function ShouldLazyStart()
-    if IsPlayerInCombat() then return true end
+    if IsGroupFighting() then return true end
     if lastFinishedTime and (GetTime() - lastFinishedTime) < PHANTOM_GUARD_WINDOW then
         return false
     end
@@ -872,14 +867,15 @@ end
 -- amount = raw heal from the event; effective/overheal come from
 -- Events.lua's target-health estimate (verified = health was readable).
 local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount, effective, overheal, isCrit, verified)
-    -- Does NOT lazy-start - see RecordCast's comment. Confirmed via
-    -- debug log: a priest's routine post-fight Renew tick, healing the
-    -- raid back up long after ShouldLazyStart's 3-second phantom-guard
-    -- window had already elapsed, phantom-started a blank encounter and
-    -- wiped the just-finished Current Fight. Healing happens constantly
-    -- outside of combat (topping off between pulls) - not valid
-    -- evidence a fight resumed.
-    if not current then return end
+    -- Lazy-starts only while the player or group is actually in combat
+    -- (a healer standing back while the tank pulls). Out-of-combat
+    -- top-offs and trailing HoT ticks after a pull are not evidence of a
+    -- fight - a post-fight Renew used to phantom-start a blank encounter
+    -- and wipe the just-finished Current Fight.
+    if not current then
+        if not IsGroupFighting() then return end
+        StartEncounter()
+    end
     local unverified = not verified
     RecordHealingInto(current.units, casterGuid, targetGuid, spellId, spellName, amount, effective, overheal, isCrit, unverified)
     RecordHealingInto(overall.units, casterGuid, targetGuid, spellId, spellName, amount, effective, overheal, isCrit, unverified)
@@ -918,10 +914,13 @@ local function RecordCountEventInto(units, bucketKey, casterGuid, targetGuid, sp
 end
 
 local function RecordCleanse(casterGuid, targetGuid, spellId, spellName)
-    -- Does NOT lazy-start - see RecordCast's comment. Dispelling a
-    -- poison/curse/disease off a party member routinely happens outside
-    -- of combat too, so it's not valid evidence a fight resumed.
-    if not current then return end
+    -- Same combat-gated lazy-start as RecordHealing: dispels also
+    -- happen out of combat and are only evidence of a fight when the
+    -- player or group is actually fighting.
+    if not current then
+        if not IsGroupFighting() then return end
+        StartEncounter()
+    end
     RecordCountEventInto(current.units, "cleanses", casterGuid, targetGuid, spellId, spellName)
     RecordCountEventInto(overall.units, "cleanses", casterGuid, targetGuid, spellId, spellName)
 end
