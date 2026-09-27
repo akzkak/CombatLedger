@@ -552,6 +552,25 @@ local function MeleeEntryFor(bucket, isPet, isOffhand)
     return isOffhand and bucket.offhand or bucket.melee
 end
 
+-- A per-target (damageDone.targets) or per-attacker (damageTaken.targets)
+-- entry. Same shape as a damage bucket (spells/melee/offhand/pet
+-- variants) so clicking it in the UI reuses the exact same per-ability
+-- breakdown code as the unit-wide view, just scoped to this one unit.
+local function EnsureTargetEntry(targets, guid)
+    local t = targets[guid]
+    if not t then
+        local info = CL.GuidCache and CL.GuidCache.Resolve(guid)
+        t = {
+            name = (info and info.name) or guid,
+            total = 0, hits = 0, spells = {},
+            melee = NewMeleeEntry(), offhand = NewMeleeEntry(),
+            petMelee = NewMeleeEntry(), petOffhand = NewMeleeEntry(),
+        }
+        targets[guid] = t
+    end
+    return t
+end
+
 -- casterGuid/targetGuid may each independently be nil (unattributable
 -- source or target) - record whichever side we actually have. Only ever
 -- for roster members though: a bar list should show "us", not whatever
@@ -580,25 +599,7 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
             end
 
             if targetGuid then
-                local t = u.damageDone.targets[targetGuid]
-                if not t then
-                    local tinfo = CL.GuidCache and CL.GuidCache.Resolve(targetGuid)
-                    -- Same shape as a damage bucket (spells/melee/offhand/
-                    -- pet variants) so clicking this target in the UI can
-                    -- reuse the exact same per-ability breakdown code as
-                    -- the unit-wide view, just scoped to this one target.
-                    t = {
-                        name = (tinfo and tinfo.name) or targetGuid,
-                        total = 0,
-                        hits = 0,
-                        spells = {},
-                        melee = NewMeleeEntry(),
-                        offhand = NewMeleeEntry(),
-                        petMelee = NewMeleeEntry(),
-                        petOffhand = NewMeleeEntry(),
-                    }
-                    u.damageDone.targets[targetGuid] = t
-                end
+                local t = EnsureTargetEntry(u.damageDone.targets, targetGuid)
                 t.total = t.total + amount
                 t.hits = t.hits + 1
                 if spellId then
@@ -630,17 +631,7 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
             -- damageDone.targets) - the breakdown window shows this as
             -- "Attackers:" instead of "Targets:" for this mode.
             if casterGuid then
-                local s = u.damageTaken.targets[casterGuid]
-                if not s then
-                    local sinfo = CL.GuidCache and CL.GuidCache.Resolve(casterGuid)
-                    s = {
-                        name = (sinfo and sinfo.name) or casterGuid,
-                        total = 0, hits = 0, spells = {},
-                        melee = NewMeleeEntry(), offhand = NewMeleeEntry(),
-                        petMelee = NewMeleeEntry(), petOffhand = NewMeleeEntry(),
-                    }
-                    u.damageTaken.targets[casterGuid] = s
-                end
+                local s = EnsureTargetEntry(u.damageTaken.targets, casterGuid)
                 s.total = s.total + amount
                 s.hits = s.hits + 1
                 if spellId then
@@ -841,6 +832,69 @@ local function RecordHealHit(entry, amount, effective, overheal, isCrit, unverif
     end
     if not entry.min or amount < entry.min then entry.min = amount end
     if not entry.max or amount > entry.max then entry.max = amount end
+end
+
+-- SPELL_MISS_* missInfo -> avoided key (vmangos SpellMissInfo; same
+-- mapping Skada uses). 7 and 8 are both immune variants.
+local SPELL_MISS_KEY = {
+    [1] = "miss", [2] = "resist", [3] = "dodge", [4] = "parry", [5] = "block",
+    [6] = "evade", [7] = "immune", [8] = "immune", [9] = "deflect",
+    [10] = "absorb", [11] = "reflect",
+}
+
+-- Spell misses live in bucket.spellMisses[spellId] (an avoided-style
+-- count table), NOT as spell entries - many missed spells never deal
+-- damage (Sunder Armor, Taunt, a resisted curse) and would otherwise
+-- show up as zero-damage rows. The breakdown window joins them onto the
+-- matching spell entry by spellId.
+local function BumpSpellMiss(bucket, spellId, key)
+    local misses = bucket.spellMisses
+    if not misses then
+        misses = {}
+        bucket.spellMisses = misses
+    end
+    local av = misses[spellId]
+    if not av then
+        av = {}
+        misses[spellId] = av
+    end
+    av[key] = (av[key] or 0) + 1
+end
+
+local function RecordSpellMissInto(units, casterGuid, targetGuid, spellId, key)
+    if casterGuid then
+        local attributed = AttributedGuid(casterGuid)
+        if IsTrackedGuid(attributed) then
+            local u = EnsureUnit(units, attributed)
+            BumpSpellMiss(u.damageDone, spellId, key)
+            if targetGuid then
+                BumpSpellMiss(EnsureTargetEntry(u.damageDone.targets, targetGuid), spellId, key)
+            end
+        end
+    end
+    if targetGuid then
+        local attributed = AttributedGuid(targetGuid)
+        if IsTrackedGuid(attributed) then
+            local u = EnsureUnit(units, attributed)
+            BumpSpellMiss(u.damageTaken, spellId, key)
+            if casterGuid then
+                BumpSpellMiss(EnsureTargetEntry(u.damageTaken.targets, casterGuid), spellId, key)
+            end
+        end
+    end
+end
+
+-- A spell (including yellow melee specials like Sinister Strike) that
+-- missed/was resisted/dodged/etc. - SPELL_MISS_SELF/OTHER.
+local function RecordSpellMiss(casterGuid, targetGuid, spellId, missInfo)
+    if not spellId then return end
+    if not current then
+        if not ShouldLazyStart() then return end
+        StartEncounter()
+    end
+    local key = SPELL_MISS_KEY[missInfo] or "other"
+    RecordSpellMissInto(current.units, casterGuid, targetGuid, spellId, key)
+    RecordSpellMissInto(overall.units, casterGuid, targetGuid, spellId, key)
 end
 
 local function RecordHealingInto(units, casterGuid, targetGuid, spellId, spellName, amount, effective, overheal, isCrit, unverified)
@@ -1144,6 +1198,7 @@ CL.Aggregator = {
     SnapshotDeathRecap = SnapshotDeathRecap, -- exposed for /cl testdeath - doesn't touch the real death counter
     RecordDamage = RecordDamage,
     RecordAvoidance = RecordAvoidance,
+    RecordSpellMiss = RecordSpellMiss,
     RecordHealing = RecordHealing,
     RecordCast = RecordCast,
     RecordCleanse = RecordCleanse,

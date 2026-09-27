@@ -283,13 +283,9 @@ local function HandleDebuffAdded(guid, spellId)
     CL.Aggregator.RecordDebuffGiven(pending.casterGuid, guid, spellId, SpellName(spellId))
 end
 
--- SPELL_MISS/ENVIRONMENTAL_DMG/SPELL_ENERGIZE exist in Nampower per its
--- changelog, but their exact argument order isn't documented (unlike
--- AUTO_ATTACK/SPELL_DAMAGE_EVENT/SPELL_HEAL). Log every raw arg instead
--- of guessing at a Handle*-style signature - baking in a wrong
--- interpretation would be worse than not parsing these at all.
--- (DAMAGE_SHIELD's shape WAS deciphered this way, from real debug-log
--- data - see HandleDamageShield below.)
+-- SPELL_ENERGIZE's shape isn't wired up yet - log every raw arg instead.
+-- (DAMAGE_SHIELD/SPELL_MISS were deciphered this way, from real
+-- debug-log data - see their handlers below.)
 local function LogRawEvent(tag)
     if not CL.debug then return end
     CL.LogLine(string.format("[RAW %s] a1=%s a2=%s a3=%s a4=%s a5=%s a6=%s a7=%s a8=%s a9=%s",
@@ -325,6 +321,59 @@ local function HandleDamageShield(isSelf, casterGuid, targetGuid, amount, school
     if relevant and amount > 0 then
         CL.Aggregator.RecordDamage(casterGuid, targetGuid, REFLECT_SPELL_ID, "Reflect", school, amount, false, nil, false)
     end
+end
+
+-- SPELL_MISS_SELF/OTHER - confirmed via debug log: a1=caster, a2=target,
+-- a3=spellId, a4=missInfo (see Aggregator.lua's SPELL_MISS_KEY). Covers
+-- yellow melee specials too (a dodged Sinister Strike), which never
+-- reach AUTO_ATTACK's victimState path.
+local function HandleSpellMiss(isSelf, casterGuid, targetGuid, spellId, missInfo)
+    spellId = tonumber(spellId)
+    missInfo = tonumber(missInfo)
+    local relevant = IsRelevant(casterGuid, targetGuid)
+    if relevant then TouchActivity() end
+    if CL.debug then
+        CL.LogLine(string.format("%s[SPELL_MISS_%s] caster=%s tgt=%s spell=%s(%s) missInfo=%s",
+            relevant and "" or "[FILTERED] ", isSelf and "SELF" or "OTHER", tostring(casterGuid), tostring(targetGuid),
+            tostring(SpellName(spellId)), tostring(spellId), tostring(missInfo)))
+    end
+    if relevant and spellId then
+        CL.Aggregator.RecordSpellMiss(casterGuid, targetGuid, spellId, missInfo)
+    end
+end
+
+-- ENVIRONMENTAL_DMG_SELF/OTHER - a1=unit, a2=damageType, a3=damage,
+-- a4=absorb, a5=resist (Skada's mapping; not yet confirmed in our own
+-- debug log). No attacker, so it records as Damage Taken only, under a
+-- synthetic negative spellId per type (like REFLECT_SPELL_ID) so each
+-- type gets its own breakdown row. Never starts an encounter: falling
+-- or drowning outside combat isn't a fight.
+local ENVIRONMENT_TYPES = {
+    [0] = { name = "Fatigue", school = 0 },
+    [1] = { name = "Drowning", school = 0 },
+    [2] = { name = "Falling", school = 0 },
+    [3] = { name = "Lava", school = 2 },
+    [4] = { name = "Slime", school = 3 },
+    [5] = { name = "Fire", school = 2 },
+    [6] = { name = "Falling", school = 0 },
+}
+local ENVIRONMENT_SPELL_ID_BASE = -100
+
+local function HandleEnvironmentalDamage(isSelf, unitGuid, damageType, amount)
+    damageType = tonumber(damageType)
+    amount = tonumber(amount) or 0
+    local tracked = CL.GuidCache.IsTracked(unitGuid)
+    local live = CL.Aggregator.GetCurrent() ~= nil
+    if CL.debug then
+        CL.LogLine(string.format("%s[ENVIRONMENTAL_DMG_%s] unit=%s type=%s dmg=%d a4=%s a5=%s",
+            (tracked and live) and "" or "[FILTERED] ", isSelf and "SELF" or "OTHER", tostring(unitGuid),
+            tostring(damageType), amount, tostring(arg4), tostring(arg5)))
+    end
+    if not tracked or not live or amount <= 0 then return end
+    TouchActivity()
+    local env = ENVIRONMENT_TYPES[damageType] or { name = "Environment", school = 0 }
+    local spellId = ENVIRONMENT_SPELL_ID_BASE - (damageType or 99)
+    CL.Aggregator.RecordDamage(nil, unitGuid, spellId, env.name, env.school, amount, false, nil, false)
 end
 
 local autoShownMainWindow = false -- see the PLAYER_ENTERING_WORLD handler below
@@ -551,14 +600,12 @@ f:SetScript("OnEvent", function()
     end
 
     if event == "SPELL_MISS_SELF" or event == "SPELL_MISS_OTHER" then
-        TouchActivity()
-        LogRawEvent(event)
+        HandleSpellMiss(event == "SPELL_MISS_SELF", arg1, arg2, arg3, arg4)
         return
     end
 
     if event == "ENVIRONMENTAL_DMG_SELF" or event == "ENVIRONMENTAL_DMG_OTHER" then
-        TouchActivity()
-        LogRawEvent(event)
+        HandleEnvironmentalDamage(event == "ENVIRONMENTAL_DMG_SELF", arg1, arg2, arg3)
         return
     end
 

@@ -214,6 +214,9 @@ local function BuildSpellList(bucket)
                 critRaw = s.critRaw,
                 overheal = s.overheal,
                 unverified = s.unverified,
+                -- SPELL_MISS_* outcomes for this spell (see Aggregator.lua's
+                -- BumpSpellMiss) - kept beside, not inside, the spell entry.
+                avoided = bucket.spellMisses and bucket.spellMisses[spellId],
             })
         end
     end
@@ -231,7 +234,11 @@ local function BuildTargetList(u, mode)
     if not bucket or not bucket.targets then return list end
     local guid, t
     for guid, t in pairs(bucket.targets) do
-        table.insert(list, { guid = guid, name = t.name, hits = t.hits, total = t.total })
+        -- A target that only ever missed/resisted (see Aggregator.lua's
+        -- RecordSpellMissInto) has total 0 - not worth a row.
+        if t.total > 0 then
+            table.insert(list, { guid = guid, name = t.name, hits = t.hits, total = t.total })
+        end
     end
     table.sort(list, function(a, b) return a.total > b.total end)
     return list
@@ -827,38 +834,39 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
     -- Main/off-hand avoidance shown separately, not summed - they carry
     -- different hit caps (dual-wield specials, weapon skill vs the
     -- target's defense) so a blended miss rate would misrepresent both.
-    local function AvoidanceBlock(label, hitEntry)
-        if not hitEntry or not hitEntry.avoided then return end
-        local av = hitEntry.avoided
-        local avoided = av.miss + av.dodge + av.parry + av.block + av.evade + av.immune + av.deflect + av.other
-        local swings = (hitEntry.hits or 0) + avoided
-        if avoided <= 0 or swings <= 0 then return end
-        Line(label, string.format("%d/%d (%.0f%%)", avoided, swings, avoided / swings * 100), 1, 0.82, 0)
-        local parts = {}
-        if av.dodge > 0 then table.insert(parts, av.dodge .. " dodge") end
-        if av.parry > 0 then table.insert(parts, av.parry .. " parry") end
-        if av.miss > 0 then table.insert(parts, av.miss .. " miss") end
-        if av.block > 0 then table.insert(parts, av.block .. " block") end
-        if av.evade > 0 then table.insert(parts, av.evade .. " evade") end
-        if av.immune > 0 then table.insert(parts, av.immune .. " immune") end
-        if av.deflect > 0 then table.insert(parts, av.deflect .. " deflect") end
-        if av.other > 0 then table.insert(parts, av.other .. " other") end
-        if table.getn(parts) > 0 then
-            idx = idx + 1
-            if idx <= MAX_DETAIL_ROWS then
-                local row = detailRows[idx]
-                row.left:SetText(table.concat(parts, ", "))
-                row.left:SetTextColor(0.7, 0.7, 0.7)
-                row.right:SetText("")
-                row:Show()
-            end
+    -- `landed` = successful attempts to compare against (hits, or
+    -- casts/direct hits for a spell with DoT ticks).
+    local function AvoidanceBlock(label, avoidedTable, landed)
+        local avoided, summary = CL.SummarizeAvoided(avoidedTable)
+        if avoided <= 0 then return end
+        local attempts = (landed or 0) + avoided
+        Line(label, string.format("%d/%d (%.0f%%)", avoided, attempts, avoided / attempts * 100), 1, 0.82, 0)
+        idx = idx + 1
+        if idx <= MAX_DETAIL_ROWS then
+            local row = detailRows[idx]
+            row.left:SetText(summary)
+            row.left:SetTextColor(0.7, 0.7, 0.7)
+            row.right:SetText("")
+            row.icon:Hide()
+            row:Show()
         end
+    end
+
+    if entry.avoided then
+        -- A DoT's ticks aren't separate attempts - one cast lands or
+        -- misses once, so compare against casts/direct hits instead.
+        local landed = entry.hits
+        if hasTicks then
+            landed = (hasDirect and entry.directHits.hits) or entry.casts or entry.hits
+        end
+        Header(" ")
+        AvoidanceBlock((mode == "taken") and "Avoided" or "Missed", entry.avoided, landed)
     end
 
     if entry.mainHand or entry.offHand then
         Header(" ")
-        AvoidanceBlock("Main Hand Avoided", entry.mainHand)
-        AvoidanceBlock("Off Hand Avoided", entry.offHand)
+        AvoidanceBlock("Main Hand Avoided", entry.mainHand and entry.mainHand.avoided, entry.mainHand and entry.mainHand.hits)
+        AvoidanceBlock("Off Hand Avoided", entry.offHand and entry.offHand.avoided, entry.offHand and entry.offHand.hits)
     end
 
     local i

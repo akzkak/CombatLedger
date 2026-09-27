@@ -820,6 +820,28 @@ function CL.AddOverhealLines(t, addLine)
     end
 end
 
+-- Display order for avoidance/miss outcomes. Melee entries always carry
+-- the first set (Aggregator.lua's NewAvoided); spell misses
+-- (SPELL_MISS_*) can add resist/absorb/reflect, so every key is optional.
+CL.AVOID_KEYS = { "dodge", "parry", "miss", "resist", "block", "absorb", "reflect", "evade", "immune", "deflect", "other" }
+
+-- Returns the total count and a "3 dodge, 1 parry" summary (nil if empty).
+function CL.SummarizeAvoided(av)
+    if not av then return 0, nil end
+    local total, parts = 0, {}
+    local i
+    for i = 1, table.getn(CL.AVOID_KEYS) do
+        local key = CL.AVOID_KEYS[i]
+        local n = av[key] or 0
+        if n > 0 then
+            total = total + n
+            table.insert(parts, n .. " " .. key)
+        end
+    end
+    if total == 0 then return 0, nil end
+    return total, table.concat(parts, ", ")
+end
+
 -- Appearance-changed pub/sub - each UI file registers a listener that
 -- re-applies font/texture/bar-height/number-format to its own pooled
 -- bars; Options fires this once after any change so every open window
