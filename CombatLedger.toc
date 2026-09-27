@@ -8,6 +8,7 @@
 
 Core.lua
 GuidCache.lua
+Bosses.lua
 Aggregator.lua
 Threat.lua
 Events.lua

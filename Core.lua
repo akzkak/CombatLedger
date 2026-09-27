@@ -55,7 +55,7 @@ CL.defaultSettings = {
     barBorderColor = { 1, 1, 1 }, -- user-customizable via Options' color picker
     clearOnJoinPartyMode = "off", -- "off" / "always" / "ask" - auto-resets (or offers to reset) the Overall segment the moment you go from solo to grouped (party or raid) - see Events.lua's group-change handler
 
-    announcePulls = true, -- "Pull: X (spell)" chat print at the start of a boss encounter (not regular elite trash) - see Aggregator.lua's IsBossTaggedEnemy
+    announcePulls = true, -- "Pull: X (spell)" chat print at the start of a boss encounter (not regular elite trash) - see Bosses.lua
     maxEncounters = 50, -- Options' "Saved fights": history kept per character, oldest dropped first (Skada's "Saved fights")
     historyBossOnly = false, -- Options' "Remember boss fights only": only boss pulls are saved to History (Skada's option of the same name)
     mergePets = true, -- pets roll up into their owner's bar in every meter mode (Skada's "Merge pets into owners"); off = pets get their own rows. Threat always keeps pets separate - see Threat.lua

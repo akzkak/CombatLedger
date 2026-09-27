@@ -6,7 +6,7 @@
     any of them with the same code:
 
         encounter = {
-            label, zone, startTime, timestamp, duration, isBoss, pullBy,
+            label, zone, startTime, timestamp, duration, isBoss, bossName, pullBy,
             series,                          -- per-2s raid totals for the report graph
             units = {
                 [guid] = {                   -- roster members only; pets merge into owners (option)
@@ -220,7 +220,7 @@ end
 local lastFinished = nil -- frozen snapshot of the previous fight, shown as "Current Fight" between pulls
 local lastFinishedTime = nil -- GetTime() when lastFinished was set - see ShouldLazyStart below
 
-local bossTagCache = {} -- [enemyGuid] = true/false, see IsBossTaggedEnemyCached - cleared per encounter
+local bossTagCache = {} -- [enemyGuid] = encounter name or false, see BossNameCached - cleared per encounter
 
 local function StartEncounter()
     dataVersion = dataVersion + 1
@@ -446,46 +446,28 @@ local function EnemyGuidFor(casterGuid, targetGuid)
     return nil
 end
 
--- Boss detection: "worldboss", or an elite/rare elite whose level shows
--- as "??" (UnitLevel -1). Most instance bosses are the latter, and elite
--- trash almost always has a real level. The GUID works as a unit token
--- (SuperWoW); the enemy is in range since we just saw a hit involving it.
-local function IsBossTaggedEnemy(enemyGuid)
-    if not enemyGuid or not UnitClassification then return false end
-    local ok, classification = pcall(UnitClassification, enemyGuid)
-    if not ok then
-        if CL.debug then
-            CL.LogLine(string.format("[BOSS_CHECK] guid=%s UnitClassification pcall failed", tostring(enemyGuid)))
-        end
-        return false
-    end
-    local isBoss = false
-    local level
-    if classification == "worldboss" then
-        isBoss = true
-    elseif classification == "elite" or classification == "rareelite" then
-        local lvlOk, lvl = pcall(UnitLevel, enemyGuid)
-        level = lvlOk and lvl
-        isBoss = lvlOk and lvl == -1
-    end
-    if CL.debug then
-        CL.LogLine(string.format("[BOSS_CHECK] guid=%s classification=%s level=%s isBoss=%s",
-            tostring(enemyGuid), tostring(classification), tostring(level), tostring(isBoss)))
-    end
-    return isBoss
-end
-
--- Classification never changes, so each enemy is checked once per
--- encounter. The first hit on each new enemy is still checked
--- immediately, which keeps pull attribution exact.
-local function IsBossTaggedEnemyCached(enemyGuid)
+-- Each enemy is classified once per encounter (see Bosses.lua); the
+-- first hit on each new enemy is still checked immediately, which keeps
+-- pull attribution exact. Returns the encounter name or false.
+local function BossNameCached(enemyGuid)
     if not enemyGuid then return false end
     local cached = bossTagCache[enemyGuid]
     if cached == nil then
-        cached = IsBossTaggedEnemy(enemyGuid)
+        cached = CL.Bosses.Classify(enemyGuid) or false
         bossTagCache[enemyGuid] = cached
     end
     return cached
+end
+
+-- Marks the live encounter as a boss fight named `name`. A BigWigs
+-- encounter name (fromBigWigs) replaces a mob name taken from rank.
+local function MarkBoss(name, fromBigWigs)
+    if not current or not name then return end
+    if current.isBoss and current.bossName and not fromBigWigs then return end
+    if current.bossName == name then return end
+    dataVersion = dataVersion + 1
+    current.isBoss = true
+    current.bossName = name
 end
 
 -- The melee entry (main/off-hand, own/pet) an auto-attack belongs in.
@@ -640,10 +622,11 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
 
     -- Pull attribution: the caster of the first hit involving a boss
     -- "pulled" it. Set once; trash-only encounters never set it.
-    if not current.pullBy and casterGuid and IsBossTaggedEnemyCached(EnemyGuidFor(casterGuid, targetGuid)) then
+    local bossName = not current.pullBy and casterGuid and BossNameCached(EnemyGuidFor(casterGuid, targetGuid))
+    if bossName then
         local info = CL.GuidCache and CL.GuidCache.Resolve(casterGuid)
         current.pullBy = { name = (info and info.name) or casterGuid, label = spellName or "Auto Attack" }
-        current.isBoss = true -- see History's "Remember boss fights only"
+        MarkBoss(bossName)
         if CL.GetSetting("announcePulls") ~= false then
             CL.Print("Pull: " .. current.pullBy.name .. " (" .. current.pullBy.label .. ")")
         end
@@ -1127,6 +1110,7 @@ CL.Aggregator = {
     GetOverall = GetOverall,
     GetOverallDuration = GetOverallDuration,
     ResetOverall = ResetOverall,
+    MarkBoss = MarkBoss,
     CompactTargets = CompactTargets,
     GetDataVersion = function() return dataVersion end,
     GetDeathRecap = GetDeathRecap,

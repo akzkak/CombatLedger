@@ -57,6 +57,8 @@ end
 -- whichever mob took the most tracked-side damage if health sampling
 -- came up empty, then to the zone name.
 local function ComputeLabel(encounter)
+    -- A boss fight is named after its boss or BigWigs encounter.
+    if encounter.bossName then return encounter.bossName end
     local bestGuid, bestHealth = nil, 0
     local hpGuid, hp
     for hpGuid, hp in pairs(encounter.mobHealth or {}) do

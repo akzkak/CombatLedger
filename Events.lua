@@ -630,6 +630,11 @@ local function Tick()
         flushAccum = 0
         -- Debug log writes are batched to once a second rather than per event.
         CL.FlushLog()
+        -- A BigWigs encounter engaging marks the fight as a boss fight
+        -- even before (or without) a hit on a rank-tagged boss.
+        if CL.Aggregator.GetCurrent() then
+            CL.Aggregator.MarkBoss(CL.Bosses.GetEngagedEncounter(), true)
+        end
         -- AURA_CAST entries that were never claimed (buff casts, filtered
         -- targets) expire here so the table stays small.
         local key, pending
