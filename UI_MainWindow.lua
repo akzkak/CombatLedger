@@ -159,7 +159,8 @@ local function BuildThreatList(filterSet)
     if not snapshot then return list, nil end
     local hasFilter = filterSet and next(filterSet) ~= nil
     local playerName = UnitName("player")
-    local tankThreat, playerMelee
+    local tankThreat, playerMelee, playerIsTank
+    local playerThreat = 0
     local guid, t
     for guid, t in pairs(snapshot) do
         if not hasFilter or filterSet[t.name] then
@@ -182,7 +183,11 @@ local function BuildThreatList(filterSet)
             })
         end
         if t.tank then tankThreat = t.threat end
-        if t.name == playerName then playerMelee = t.melee end
+        if t.name == playerName then
+            playerMelee = t.melee
+            playerThreat = t.threat or 0
+            playerIsTank = t.tank
+        end
     end
     table.sort(list, function(a, b) return a.total > b.total end)
 
@@ -195,13 +200,18 @@ local function BuildThreatList(filterSet)
         list[rankIndex].threatRank = rankIndex
     end
 
+    -- How much more threat the PLAYER can generate before pulling -
+    -- the threshold minus the player's own current threat, not minus
+    -- the tank's. No marker while the player is the one tanking.
     local marker = nil
-    if tankThreat and tankThreat > 0 then
+    if tankThreat and tankThreat > 0 and not playerIsTank then
         local threshold = tankThreat * (playerMelee and 1.1 or 1.3)
+        local remaining = threshold - playerThreat
+        if remaining < 0 then remaining = 0 end
         marker = {
             guid = "THREAT_AGRO_MARKER",
             name = "Pull Aggro At",
-            total = threshold - tankThreat,
+            total = remaining,
             isAgroMarker = true,
         }
     end
