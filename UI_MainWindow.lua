@@ -429,51 +429,12 @@ local function ShowBarTooltip(inst, bar)
 
     if mode == "damage" or mode == "taken" then
         local bucket = (mode == "taken") and u.damageTaken or u.damageDone
-        if bucket then
-            local function AddSums(sum, av)
-                local k, v
-                for k, v in pairs(av) do
-                    sum[k] = (sum[k] or 0) + v
-                end
-            end
-
-            local sum = {}
-            local hits = 0
-            local entry
-            for _, entry in ipairs({ bucket.melee, bucket.offhand, bucket.petMelee, bucket.petOffhand }) do
-                if entry then
-                    hits = hits + (entry.hits or 0)
-                    if entry.avoided then AddSums(sum, entry.avoided) end
-                end
-            end
-            local avoided, summary = CL.SummarizeAvoided(sum)
-            if avoided > 0 then
-                local swings = hits + avoided
-                local label = (mode == "taken") and "Swings avoided" or "Swings missed"
-                GameTooltip:AddDoubleLine(label,
-                    string.format("%d/%d (%.0f%%)", avoided, swings, (avoided / swings) * 100), 1, 1, 1, 1, 1, 1)
-                GameTooltip:AddLine(summary, 0.7, 0.7, 0.7)
-            end
-
-            CL.AddMitigationLines(bucket, hits, function(label, value)
-                GameTooltip:AddDoubleLine(label, value, 1, 1, 1, 1, 1, 1)
-            end)
-
-            -- Spell misses (SPELL_MISS_*) - a count only, since a spell's
-            -- hit total mixes direct hits with DoT ticks and wouldn't be a
-            -- fair denominator here (the breakdown window does it per spell).
-            if bucket.spellMisses then
-                local spellSum = {}
-                local av
-                for _, av in pairs(bucket.spellMisses) do AddSums(spellSum, av) end
-                local spellAvoided, spellSummary = CL.SummarizeAvoided(spellSum)
-                if spellAvoided > 0 then
-                    GameTooltip:AddDoubleLine((mode == "taken") and "Spells avoided" or "Spells missed",
-                        tostring(spellAvoided), 1, 1, 1, 1, 1, 1)
-                    GameTooltip:AddLine(spellSummary, 0.7, 0.7, 0.7)
-                end
-            end
-        end
+        local hits = CL.AddAvoidanceLines(bucket, mode,
+            function(label, value) GameTooltip:AddDoubleLine(label, value, 1, 1, 1, 1, 1, 1) end,
+            function(text) GameTooltip:AddLine(text, 0.7, 0.7, 0.7) end)
+        CL.AddMitigationLines(bucket, hits, function(label, value)
+            GameTooltip:AddDoubleLine(label, value, 1, 1, 1, 1, 1, 1)
+        end)
     end
 
     AddTopList("By target:", BuildTargetSummary(u, mode), TOOLTIP_TOP_TARGETS, total)

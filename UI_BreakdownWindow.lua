@@ -655,6 +655,17 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         local c = dim and 0.6 or 1
         Line(label, value, c, c, c)
     end
+    -- A grey, label-only row (e.g. "3 dodge, 1 parry").
+    local function Note(text)
+        idx = idx + 1
+        if idx > MAX_DETAIL_ROWS then return end
+        local row = detailRows[idx]
+        row.left:SetText(text)
+        row.left:SetTextColor(0.7, 0.7, 0.7)
+        row.right:SetText("")
+        row.icon:Hide()
+        row:Show()
+    end
     local function Header(label)
         idx = idx + 1
         if idx > MAX_DETAIL_ROWS then return end
@@ -709,10 +720,7 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
             Line("Overall Crit", string.format("%d (%.0f%%)", totalCrits, totalCrits / totalHits * 100))
         end
         if mode == "damage" or mode == "taken" then
-            local meleeHits = 0
-            for i = 1, table.getn(list) do
-                if list[i].isMelee then meleeHits = meleeHits + (list[i].hits or 0) end
-            end
+            local meleeHits = CL.AddAvoidanceLines(bucket, mode, Line, Note)
             CL.AddMitigationLines(bucket, meleeHits, DimLine)
         end
         Line("Abilities", tostring(table.getn(list)))
@@ -754,10 +762,11 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         window.detailName:SetPoint("TOPLEFT", window.rightPane, "TOPLEFT", 0, 0)
     end
 
-    Line("Total", FormatNumber(entry.total))
+    local totalText = FormatNumber(entry.total)
     if unitTotal and unitTotal > 0 then
-        Line("% of Total", string.format("%.0f%%", entry.total / unitTotal * 100))
+        totalText = totalText .. string.format(" (%.0f%%)", entry.total / unitTotal * 100)
     end
+    Line("Total", totalText)
     Line("Rate", FormatNumber(entry.total / (duration or 1)) .. " " .. CL.RateSuffix(mode))
     if mode == "healing" then CL.AddOverhealLines(entry, DimLine) end
 
@@ -796,6 +805,37 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         Line("Min / Max", FormatNumber(entry.min) .. " / " .. FormatNumber(entry.max))
     end
 
+    -- Misses right after the hit counts (they're attempts too), before
+    -- crits and mitigation, so they're never the lines cut off at
+    -- MAX_DETAIL_ROWS. `landed` = successful attempts to compare against.
+    local verb = (mode == "taken") and "avoided" or "missed"
+    local function AvoidanceLines(label, avoidedTable, landed)
+        local avoided, summary = CL.SummarizeAvoided(avoidedTable)
+        if avoided <= 0 then return end
+        local attempts = (landed or 0) + avoided
+        Line(label, string.format("%d/%d (%.0f%%)", avoided, attempts, avoided / attempts * 100), 1, 0.82, 0)
+        Note(summary)
+    end
+    if entry.mainHand or entry.offHand then
+        -- Main and off hand have different hit caps, so a dual wielder
+        -- sees them separately; otherwise it's just "Missed".
+        local offHandSwings = entry.offHand and ((entry.offHand.hits or 0) + CL.SummarizeAvoided(entry.offHand.avoided)) or 0
+        if offHandSwings > 0 then
+            AvoidanceLines("Main hand " .. verb, entry.mainHand and entry.mainHand.avoided, entry.mainHand and entry.mainHand.hits)
+            AvoidanceLines("Off-hand " .. verb, entry.offHand.avoided, entry.offHand.hits)
+        else
+            AvoidanceLines((mode == "taken") and "Avoided" or "Missed", entry.mainHand and entry.mainHand.avoided, entry.mainHand and entry.mainHand.hits)
+        end
+    elseif entry.avoided then
+        -- A DoT's ticks aren't separate attempts - one cast lands or
+        -- misses once, so compare against casts/direct hits instead.
+        local landed = entry.hits
+        if hasTicks then
+            landed = (hasDirect and entry.directHits.hits) or entry.casts or entry.hits
+        end
+        AvoidanceLines((mode == "taken") and "Avoided" or "Missed", entry.avoided, landed)
+    end
+
     if entry.crits ~= nil then
         local hits = entry.hits or 0
         local crits = entry.crits or 0
@@ -809,53 +849,21 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         Line("Crits", string.format("%d (%.0f%%)", crits, critPct))
         if crits > 0 then
             Line(entry.raw and "Crit healing" or "Crit damage", string.format("%s (%.0f%%)", FormatNumber(critTotal), critDmgPct))
-            Line("Avg crit", FormatNumber(sizeCrit / crits))
         end
+        -- Average normal and crit size share one line to leave room.
         local nonCritHits = hits - crits
-        if nonCritHits > 0 then
-            Line(entry.raw and "Avg normal heal" or "Avg normal hit", FormatNumber((sizeTotal - sizeCrit) / nonCritHits))
-        end
-    end
-
-    -- Main/off-hand avoidance shown separately, not summed - they carry
-    -- different hit caps (dual-wield specials, weapon skill vs the
-    -- target's defense) so a blended miss rate would misrepresent both.
-    -- `landed` = successful attempts to compare against (hits, or
-    -- casts/direct hits for a spell with DoT ticks).
-    local function AvoidanceBlock(label, avoidedTable, landed)
-        local avoided, summary = CL.SummarizeAvoided(avoidedTable)
-        if avoided <= 0 then return end
-        local attempts = (landed or 0) + avoided
-        Line(label, string.format("%d/%d (%.0f%%)", avoided, attempts, avoided / attempts * 100), 1, 0.82, 0)
-        idx = idx + 1
-        if idx <= MAX_DETAIL_ROWS then
-            local row = detailRows[idx]
-            row.left:SetText(summary)
-            row.left:SetTextColor(0.7, 0.7, 0.7)
-            row.right:SetText("")
-            row.icon:Hide()
-            row:Show()
+        local avgNormal = (nonCritHits > 0) and FormatNumber((sizeTotal - sizeCrit) / nonCritHits) or nil
+        local avgCrit = (crits > 0) and FormatNumber(sizeCrit / crits) or nil
+        if avgNormal and avgCrit then
+            Line(entry.raw and "Avg heal / crit" or "Avg hit / crit", avgNormal .. " / " .. avgCrit)
+        elseif avgNormal then
+            Line(entry.raw and "Avg heal" or "Avg hit", avgNormal)
+        elseif avgCrit then
+            Line("Avg crit", avgCrit)
         end
     end
 
     CL.AddMitigationLines(entry, entry.isMelee and entry.hits, DimLine)
-
-    if entry.avoided then
-        -- A DoT's ticks aren't separate attempts - one cast lands or
-        -- misses once, so compare against casts/direct hits instead.
-        local landed = entry.hits
-        if hasTicks then
-            landed = (hasDirect and entry.directHits.hits) or entry.casts or entry.hits
-        end
-        Header(" ")
-        AvoidanceBlock((mode == "taken") and "Avoided" or "Missed", entry.avoided, landed)
-    end
-
-    if entry.mainHand or entry.offHand then
-        Header(" ")
-        AvoidanceBlock("Main Hand Avoided", entry.mainHand and entry.mainHand.avoided, entry.mainHand and entry.mainHand.hits)
-        AvoidanceBlock("Off Hand Avoided", entry.offHand and entry.offHand.avoided, entry.offHand and entry.offHand.hits)
-    end
 
     local i
     for i = idx + 1, MAX_DETAIL_ROWS do

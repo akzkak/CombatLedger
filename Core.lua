@@ -653,6 +653,50 @@ function CL.SummarizeAvoided(av)
     return total, table.concat(parts, ", ")
 end
 
+-- Miss/dodge/parry/... lines for a damage bucket (unit-wide or one
+-- target), shared by the bar tooltip and the breakdown summary:
+--   swings: white melee swings avoided out of all swings, with the split
+--   spells: spell misses by outcome, as a count - a spell's hit total
+--           mixes direct hits with DoT ticks, so it's no fair denominator
+-- addLine(label, value) for a value row, addNote(text) for the grey split.
+-- `mode` "taken" words it as avoided rather than missed. Returns the
+-- number of landed melee swings (for glancing/crushing percentages).
+function CL.AddAvoidanceLines(bucket, mode, addLine, addNote)
+    if not bucket then return 0 end
+    local function AddSums(sum, av)
+        local k, v
+        for k, v in pairs(av) do sum[k] = (sum[k] or 0) + v end
+    end
+
+    local swingSum, swingHits = {}, 0
+    local _, entry
+    for _, entry in ipairs({ bucket.melee, bucket.offhand, bucket.petMelee, bucket.petOffhand }) do
+        if entry then
+            swingHits = swingHits + (entry.hits or 0)
+            if entry.avoided then AddSums(swingSum, entry.avoided) end
+        end
+    end
+    local avoided, summary = CL.SummarizeAvoided(swingSum)
+    if avoided > 0 then
+        local swings = swingHits + avoided
+        addLine((mode == "taken") and "Swings avoided" or "Swings missed",
+            string.format("%d/%d (%.0f%%)", avoided, swings, avoided / swings * 100))
+        addNote(summary)
+    end
+
+    if bucket.spellMisses then
+        local spellSum = {}
+        local av
+        for _, av in pairs(bucket.spellMisses) do AddSums(spellSum, av) end
+        local spellAvoided, spellSummary = CL.SummarizeAvoided(spellSum)
+        if spellAvoided > 0 then
+            addLine((mode == "taken") and "Spells avoided" or "Spells missed", tostring(spellAvoided))
+            addNote(spellSummary)
+        end
+    end
+    return swingHits
+end
+
 -- Mitigation lines for anything carrying a `mit` table (Aggregator.lua's
 -- ApplyMitigation), shared by the main tooltip and the breakdown panel.
 -- meleeHits = the hit count glancing/crushing percentages are taken of

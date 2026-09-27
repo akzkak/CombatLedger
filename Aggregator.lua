@@ -733,25 +733,40 @@ local VICTIMSTATE_KEY = {
     [CL.VICTIMSTATE_DEFLECT] = "deflect",
 }
 
+-- Counts one avoided swing on a melee entry (and its mitigation, if any).
+local function CountAvoided(entry, key, mit)
+    entry.avoided[key] = (entry.avoided[key] or 0) + 1
+    ApplyMitigation(entry, mit)
+end
+
+-- Recorded unit-wide and per target/attacker, so a breakdown filtered to
+-- one target shows that target's misses too.
 local function RecordAvoidanceInto(units, casterGuid, targetGuid, key, isOffhand, mit)
     if casterGuid then
         local attributed = AttributedGuid(casterGuid)
         if IsTrackedGuid(attributed) then
             local u = EnsureUnit(units, attributed)
-            local entry = MeleeEntryFor(u.damageDone, attributed ~= casterGuid, isOffhand)
-            entry.avoided[key] = (entry.avoided[key] or 0) + 1
-            ApplyMitigation(entry, mit)
+            local isPet = attributed ~= casterGuid
+            CountAvoided(MeleeEntryFor(u.damageDone, isPet, isOffhand), key, mit)
             ApplyMitigation(u.damageDone, mit)
+            if targetGuid then
+                local t = EnsureTargetEntry(units, u.damageDone.targets, targetGuid)
+                CountAvoided(MeleeEntryFor(t, isPet, isOffhand), key, mit)
+                ApplyMitigation(t, mit)
+            end
         end
     end
     if targetGuid then
         local attributed = AttributedGuid(targetGuid)
         if IsTrackedGuid(attributed) then
             local u = EnsureUnit(units, attributed)
-            local entry = MeleeEntryFor(u.damageTaken, attributed ~= targetGuid, isOffhand)
-            entry.avoided[key] = (entry.avoided[key] or 0) + 1
-            ApplyMitigation(entry, mit)
+            CountAvoided(MeleeEntryFor(u.damageTaken, attributed ~= targetGuid, isOffhand), key, mit)
             ApplyMitigation(u.damageTaken, mit)
+            if casterGuid then
+                local s = EnsureTargetEntry(units, u.damageTaken.targets, casterGuid)
+                CountAvoided(MeleeEntryFor(s, false, isOffhand), key, mit)
+                ApplyMitigation(s, mit)
+            end
         end
     end
 end
