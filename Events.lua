@@ -385,10 +385,58 @@ local function IsGrouped()
         or ((GetNumPartyMembers and GetNumPartyMembers()) or 0) > 0
 end
 
--- Grouped state as of the last roster event, so Options' "clear Overall
--- on joining a group" fires only on the solo -> grouped transition, not
--- on every roster change while already grouped.
+--------------------------------------------------------------------------
+-- Automatic Overall resets (Options, "Clear Overall"): on joining a
+-- group, leaving one, or entering an instance, each Off/Ask/Always.
+-- Never applied mid-fight: a reset requested while an encounter is live
+-- waits until it finishes (the latest request wins).
+--------------------------------------------------------------------------
+
+-- Grouped state as of the last roster event, so the join/leave rules
+-- fire only on actual transitions. Re-read on the first loading screen,
+-- since group info isn't available yet when this file loads.
 local wasGrouped = IsGrouped()
+local pendingReset = nil -- { mode, reason } waiting for the live fight to end
+
+local function ApplyReset(mode, reason)
+    if mode == "always" then
+        CL.Aggregator.ResetOverall()
+        if CL.UI and CL.UI.RefreshAllInstances then CL.UI.RefreshAllInstances() end
+        CL.Print("Overall cleared - " .. reason)
+    elseif mode == "ask" then
+        StaticPopup_Show("COMBATLEDGER_CLEAR_OVERALL", reason)
+    end
+end
+
+local function RequestReset(settingKey, reason)
+    local mode = CL.GetSetting(settingKey)
+    if mode ~= "ask" and mode ~= "always" then return end
+    if CL.Aggregator.GetCurrent() then
+        pendingReset = { mode = mode, reason = reason }
+    else
+        ApplyReset(mode, reason)
+    end
+end
+
+-- Entering an instance counts only when it's a different instance than
+-- the last one, or the player has been away from it for a while - a
+-- corpse run or a quick trip out doesn't ask again. Saved, so a /reload
+-- inside the instance doesn't count either.
+local INSTANCE_REENTRY_SECONDS = 1800
+
+local function CheckInstanceEntry()
+    local inInstance = IsInInstance and IsInInstance()
+    local zone = (GetRealZoneText and GetRealZoneText()) or ""
+    local last = CombatLedgerDB.lastInstance
+    if inInstance then
+        if not last or last.zone ~= zone or (time() - (last.seen or 0)) > INSTANCE_REENTRY_SECONDS then
+            RequestReset("clearOnEnterInstanceMode", "you entered " .. zone .. ".")
+        end
+        CombatLedgerDB.lastInstance = { zone = zone, seen = time() }
+    elseif last then
+        last.seen = time() -- time of leaving: the absence is measured from here
+    end
+end
 
 local UnitInCombat = CL.GuidCache.UnitInCombat
 local AnyGroupMemberInCombat = CL.GuidCache.AnyGroupMemberInCombat -- cached ~0.25s, see GuidCache.lua
@@ -397,6 +445,12 @@ local function FinishEncounter()
     pendingEndSince = nil
     local finished = CL.Aggregator.EndEncounter(lastEventTime)
     if not finished then return end
+
+    if pendingReset then
+        local reset = pendingReset
+        pendingReset = nil
+        ApplyReset(reset.mode, reset.reason)
+    end
 
     -- Not saved: near-empty encounters (a stray hit before the idle
     -- timeout), and non-boss fights while "Remember boss fights only" is on.
@@ -410,6 +464,7 @@ local function FinishEncounter()
     -- hidden mid-fight, so only hide when genuinely out of combat.
     if CL.UI and CL.UI.ApplyAutoHide and not UnitAffectingCombat("player") then
         CL.UI.ApplyAutoHide()
+        CL.UI.ApplyCombatModes(false)
     end
 
     if CL.debug then
@@ -461,6 +516,7 @@ local function Dispatch()
         -- point where saved state and window layouts can be restored.
         if not autoShownMainWindow then
             autoShownMainWindow = true
+            wasGrouped = IsGrouped()
             -- Restore before the first Show() so windows open on real data.
             CL.Aggregator.RestoreState(CombatLedgerDB.liveState)
             if CL.Aggregator.GetCurrent() then
@@ -480,6 +536,8 @@ local function Dispatch()
                 CL.UIOptions.RefreshMinimapPosition()
             end
         end
+        -- After the restore above, so a reset isn't undone by it.
+        CheckInstanceEntry()
         return
     end
 
@@ -493,14 +551,9 @@ local function Dispatch()
             end
             local grouped = IsGrouped()
             if grouped and not wasGrouped then
-                local mode = CL.GetSetting("clearOnJoinPartyMode")
-                if mode == "always" then
-                    CL.Aggregator.ResetOverall()
-                    if CL.UI and CL.UI.RefreshAllInstances then CL.UI.RefreshAllInstances() end
-                    CL.Print("Overall cleared - joined a group.")
-                elseif mode == "ask" then
-                    StaticPopup_Show("COMBATLEDGER_CLEAR_ON_JOIN")
-                end
+                RequestReset("clearOnJoinPartyMode", "you joined a group.")
+            elseif wasGrouped and not grouped then
+                RequestReset("clearOnLeavePartyMode", "you left the group.")
             end
             wasGrouped = grouped
         end
@@ -523,6 +576,7 @@ local function Dispatch()
         CL.Aggregator.StartEncounter()
         if CL.UI and CL.UI.ApplyAutoShow then
             CL.UI.ApplyAutoShow()
+            CL.UI.ApplyCombatModes(true)
         end
         return
     end

@@ -53,7 +53,10 @@ CL.defaultSettings = {
     highlightSelfColor = { 1, 0.82, 0 }, -- Options color picker; gold by default
     barBorderEnabled = false, -- border around EVERY bar, in barBorderColor below - independent of highlightSelf, which always wins on your own row regardless of this
     barBorderColor = { 1, 1, 1 }, -- user-customizable via Options' color picker
-    clearOnJoinPartyMode = "off", -- "off" / "always" / "ask" - auto-resets (or offers to reset) the Overall segment the moment you go from solo to grouped (party or raid) - see Events.lua's group-change handler
+    -- Automatic Overall resets (see Events.lua's reset rules): "off" / "ask" / "always".
+    clearOnJoinPartyMode = "off", -- going from solo to grouped
+    clearOnLeavePartyMode = "off", -- going from grouped to solo
+    clearOnEnterInstanceMode = "off", -- entering an instance (not a re-entry after a short absence)
 
     announcePulls = true, -- "Pull: X (spell)" chat print at the start of a boss encounter (not regular elite trash) - see Bosses.lua
     maxEncounters = 50, -- Options' "Saved fights": history kept per character, oldest dropped first (Skada's "Saved fights")
@@ -747,6 +750,13 @@ end
 
 -- Announce channels. "auto" resolves at announce time: raid, else
 -- party, else say.
+-- Choices for the automatic Overall reset rules.
+CL.RESET_MODES = {
+    { key = "off", label = "Off" },
+    { key = "ask", label = "Ask" },
+    { key = "always", label = "Always" },
+}
+
 CL.ANNOUNCE_CHANNELS = {
     { key = "auto", label = "Auto (raid/party)" },
     { key = "say", label = "Say" },

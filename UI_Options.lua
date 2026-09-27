@@ -17,7 +17,7 @@ CL.UIOptions = OPT
 
 -- WINDOW_HEIGHT fits the Advanced tab with every window row in use
 -- (MAX_WINDOW_ROWS rows of three lines each) plus padding.
-local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 700 -- +24 over the prior ceiling for the "Ask before clearing" row (join-party clear is now two checkboxes, not one)
+local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 724 -- +24 over the prior ceiling for the "Ask before clearing" row (join-party clear is now two checkboxes, not one)
 local MAX_WINDOW_ROWS = 4 -- most people won't run more than 2-3 extra meter windows at once
 local ROW_HEIGHT = 24
 
@@ -671,45 +671,35 @@ local function CreateWindow()
     end)
     f.testCB = testCB
 
-    -- Clear Overall on going from solo to grouped (Events.lua), so it
-    -- covers just this group; Current Fight and History are untouched.
-    -- Two checkboxes form one off/always/ask choice: checking one
-    -- unchecks the other, unchecking the active one means off.
-    local clearAlwaysLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    y = NextY()
-    clearAlwaysLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
-    clearAlwaysLabel:SetText("Always clear on join party")
-    local clearOnJoinAlwaysCB = CreateFrame("CheckButton", "CombatLedgerClearOnJoinAlwaysCB", pageAdvanced, "UICheckButtonTemplate")
-    clearOnJoinAlwaysCB:SetWidth(20)
-    clearOnJoinAlwaysCB:SetHeight(20)
-    clearOnJoinAlwaysCB:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 3)
-    clearOnJoinAlwaysCB:SetScript("OnClick", function()
-        if this:GetChecked() == 1 then
-            CL.SetSetting("clearOnJoinPartyMode", "always")
-            f.clearOnJoinAskCB:SetChecked(false)
-        else
-            CL.SetSetting("clearOnJoinPartyMode", "off")
-        end
-    end)
-    f.clearOnJoinAlwaysCB = clearOnJoinAlwaysCB
-
-    local clearAskLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    y = NextY()
-    clearAskLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
-    clearAskLabel:SetText("Ask before clearing")
-    local clearOnJoinAskCB = CreateFrame("CheckButton", "CombatLedgerClearOnJoinAskCB", pageAdvanced, "UICheckButtonTemplate")
-    clearOnJoinAskCB:SetWidth(20)
-    clearOnJoinAskCB:SetHeight(20)
-    clearOnJoinAskCB:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 3)
-    clearOnJoinAskCB:SetScript("OnClick", function()
-        if this:GetChecked() == 1 then
-            CL.SetSetting("clearOnJoinPartyMode", "ask")
-            f.clearOnJoinAlwaysCB:SetChecked(false)
-        else
-            CL.SetSetting("clearOnJoinPartyMode", "off")
-        end
-    end)
-    f.clearOnJoinAskCB = clearOnJoinAskCB
+    -- Automatic Overall resets (Events.lua): Off / Ask / Always each.
+    -- Current Fight and History are never touched.
+    local function CreateResetRule(labelText, settingKey)
+        local label = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        y = NextY()
+        label:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+        label:SetText(labelText)
+        local btn = CreateSmallButton(pageAdvanced, 90, "")
+        btn:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 1)
+        btn:SetScript("OnClick", function()
+            local options = {}
+            local i
+            for i = 1, table.getn(CL.RESET_MODES) do
+                local key = CL.RESET_MODES[i].key
+                table.insert(options, { label = CL.RESET_MODES[i].label, onClick = function()
+                    CL.SetSetting(settingKey, key)
+                    RefreshOptionsWindow()
+                end })
+            end
+            CL.ShowDropdown(btn, options)
+        end)
+        btn.settingKey = settingKey
+        return btn
+    end
+    f.resetRuleBtns = {
+        CreateResetRule("Clear Overall on joining group", "clearOnJoinPartyMode"),
+        CreateResetRule("Clear Overall on leaving group", "clearOnLeavePartyMode"),
+        CreateResetRule("Clear Overall on entering instance", "clearOnEnterInstanceMode"),
+    }
 
     -- Windows list: one row per meter window (from CL.UI.GetWindowList),
     -- each with its own mode, segment, size and position. A fixed pool of
@@ -732,8 +722,9 @@ local function CreateWindow()
     f.newWindowBtn = newWindowBtn
 
     -- Each row takes three lines: name + close button; the window's
-    -- auto-show/auto-hide/grouped-only toggles; and (extra windows only)
-    -- "Mirror Main", a one-time copy of Main's size/position.
+    -- auto-show/auto-hide/grouped-only toggles; its "In combat" mode, plus
+    -- (extra windows only) "Mirror Main", a one-time copy of Main's
+    -- size/position.
     -- The start offset is kept so RefreshOptionsWindow can place
     -- resetPosBtn right after the rows that actually exist.
     local windowRowsStartY = yOffset
@@ -787,8 +778,15 @@ local function CreateWindow()
         row.hideCB = CreateRowToggle("Auto-hide", "Auto-hide this window the moment combat ends.", 92)
         row.groupCB = CreateRowToggle("Grouped only", "Only ever auto-show this window while you're in a party or raid - hides it immediately if you leave group, even mid-combat.", 186)
 
-        local mirrorBtn = CreateSmallButton(row, WINDOW_WIDTH - 26, "Mirror Main (size/position)")
-        mirrorBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -40)
+        -- "In combat" mode: the mode this window switches to while in
+        -- combat (UI.ApplyCombatModes), or Off.
+        local halfWidth = math.floor((WINDOW_WIDTH - 30) / 2)
+        local combatModeBtn = CreateSmallButton(row, halfWidth, "")
+        combatModeBtn:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -40)
+        row.combatModeBtn = combatModeBtn
+
+        local mirrorBtn = CreateSmallButton(row, halfWidth, "Mirror Main")
+        mirrorBtn:SetPoint("LEFT", combatModeBtn, "RIGHT", 4, 0)
         row.mirrorBtn = mirrorBtn
 
         f.windowRows[wi] = row
@@ -819,8 +817,6 @@ local function CreateWindow()
             pfUI.api.SkinCheckbox(classColorCB)
             pfUI.api.SkinCheckbox(smoothCB)
             pfUI.api.SkinCheckbox(testCB)
-            pfUI.api.SkinCheckbox(clearOnJoinAlwaysCB)
-            pfUI.api.SkinCheckbox(clearOnJoinAskCB)
             pfUI.api.SkinCheckbox(announcePullsCB)
             pfUI.api.SkinCheckbox(mergePetsCB)
             pfUI.api.SkinCheckbox(bossOnlyCB)
@@ -836,6 +832,7 @@ local function CreateWindow()
             for wi = 1, table.getn(f.windowRows) do
                 pfUI.api.SkinButton(f.windowRows[wi].rowCloseBtn)
                 pfUI.api.SkinButton(f.windowRows[wi].mirrorBtn)
+                pfUI.api.SkinButton(f.windowRows[wi].combatModeBtn)
                 pfUI.api.SkinCheckbox(f.windowRows[wi].showCB)
                 pfUI.api.SkinCheckbox(f.windowRows[wi].hideCB)
                 pfUI.api.SkinCheckbox(f.windowRows[wi].groupCB)
@@ -853,6 +850,10 @@ local function CreateWindow()
             pfUI.api.SkinButton(announceCountStepper.plus)
             pfUI.api.SkinButton(savedFightsStepper.minus)
             pfUI.api.SkinButton(savedFightsStepper.plus)
+            local ri
+            for ri = 1, table.getn(f.resetRuleBtns) do
+                pfUI.api.SkinButton(f.resetRuleBtns[ri])
+            end
         end)
         f:SetBackdropBorderColor(themeR, themeG, themeB, 1)
     end
@@ -919,9 +920,11 @@ RefreshOptionsWindow = function()
     window.bossOnlyCB:SetChecked(CL.GetSetting("historyBossOnly") == true)
 
     window.testCB:SetChecked(CL.testMode)
-    local clearMode = CL.GetSetting("clearOnJoinPartyMode")
-    window.clearOnJoinAlwaysCB:SetChecked(clearMode == "always")
-    window.clearOnJoinAskCB:SetChecked(clearMode == "ask")
+    local ri
+    for ri = 1, table.getn(window.resetRuleBtns) do
+        local btn = window.resetRuleBtns[ri]
+        btn.label:SetText(LabelForKey(CL.RESET_MODES, CL.GetSetting(btn.settingKey) or "off") .. " |cff999999v|r")
+    end
 
     if window.windowRows then
         local list = (CL.UI and CL.UI.GetWindowList and CL.UI.GetWindowList()) or {}
@@ -950,6 +953,30 @@ RefreshOptionsWindow = function()
                     row.rowCloseBtn:Hide()
                     row.mirrorBtn:Hide()
                 end
+
+                local combatMode = CL.GetWindowOption(id, "combatMode", "")
+                local combatLabel = "Off"
+                local choices = (CL.UI and CL.UI.GetModeChoices and CL.UI.GetModeChoices()) or {}
+                local ci
+                for ci = 1, table.getn(choices) do
+                    if choices[ci].key == combatMode then combatLabel = choices[ci].label end
+                end
+                row.combatModeBtn.label:SetText("In combat: " .. combatLabel .. " |cff999999v|r")
+                row.combatModeBtn:SetScript("OnClick", function()
+                    local options = { { label = "Off", onClick = function()
+                        CL.SetWindowOption(id, "combatMode", "")
+                        RefreshOptionsWindow()
+                    end } }
+                    local mi
+                    for mi = 1, table.getn(choices) do
+                        local key = choices[mi].key
+                        table.insert(options, { label = choices[mi].label, onClick = function()
+                            CL.SetWindowOption(id, "combatMode", key)
+                            RefreshOptionsWindow()
+                        end })
+                    end
+                    CL.ShowDropdown(row.combatModeBtn, options)
+                end)
 
                 row.showCB:SetChecked(CL.GetWindowOption(id, "autoShowInCombat", true))
                 row.showCB:SetScript("OnClick", function()

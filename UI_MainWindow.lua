@@ -1013,6 +1013,19 @@ local function CreateWindowFrame(inst)
     local modeBtn = CreateHeaderButton(f, 20, "")
     SetHeaderButtonText(modeBtn, MODE_TITLES[f.mode] or f.mode, false)
     modeBtn:SetPoint("RIGHT", segBtn, "LEFT", -4, 0)
+
+    -- Switches this window's mode. `persist` saves it as the window's
+    -- chosen mode; the automatic in-combat switch (UI.ApplyCombatModes)
+    -- doesn't, so a reload mid-fight comes back in the chosen mode.
+    local function SetMode(key, persist)
+        f.mode = key
+        SetHeaderButtonText(modeBtn, MODE_TITLES[key] or key, false)
+        UpdateSegButtonForMode()
+        if persist then CL.SaveWindowState(id, f.mode, f.segment, f.threatFilter) end
+        RefreshInstance(inst)
+    end
+    f.SetMode = SetMode
+
     modeBtn:SetScript("OnClick", function()
         -- Same explicit reset as segBtn above - see that comment.
         modeBtn:SetBackdropColor(0.12, 0.12, 0.14, 0.9)
@@ -1021,11 +1034,9 @@ local function CreateWindowFrame(inst)
         for i = 1, table.getn(MODE_ORDER) do
             local key = MODE_ORDER[i]
             table.insert(options, { label = MODE_TITLES[key] or key, onClick = function()
-                f.mode = key
-                SetHeaderButtonText(modeBtn, MODE_TITLES[key] or key, false)
-                UpdateSegButtonForMode()
-                CL.SaveWindowState(id, f.mode, f.segment, f.threatFilter)
-                RefreshInstance(inst)
+                -- A manual pick during combat is kept after the fight.
+                inst.restoreMode = nil
+                SetMode(key, true)
             end })
         end
         CL.ShowDropdown(modeBtn, options)
@@ -1559,6 +1570,40 @@ function UI.ApplyAutoHide()
     end
 end
 
+-- Per-window "In combat" mode (window option combatMode, "" = off): on
+-- combat start a window switches to it, remembering its own mode; when
+-- the fight ends it switches back, unless the mode was changed by hand
+-- in between.
+function UI.ApplyCombatModes(inCombat)
+    local id, inst
+    for id, inst in pairs(instances) do
+        local f = inst.frame
+        if f and f.SetMode then
+            if inCombat then
+                local combatMode = CL.GetWindowOption(id, "combatMode", "")
+                if combatMode ~= "" and combatMode ~= f.mode then
+                    inst.restoreMode = f.mode
+                    f.SetMode(combatMode, false)
+                end
+            elseif inst.restoreMode then
+                local mode = inst.restoreMode
+                inst.restoreMode = nil
+                f.SetMode(mode, false)
+            end
+        end
+    end
+end
+
+-- Mode keys and titles in menu order, for Options.
+function UI.GetModeChoices()
+    local list = {}
+    local i
+    for i = 1, table.getn(MODE_ORDER) do
+        table.insert(list, { key = MODE_ORDER[i], label = MODE_TITLES[MODE_ORDER[i]] })
+    end
+    return list
+end
+
 -- On roster changes: "Only show while grouped" windows hide when you
 -- leave a group and reappear when you join one, unless their other rules
 -- (UI.IsSuppressedNow) still forbid it.
@@ -1701,8 +1746,9 @@ StaticPopupDialogs["COMBATLEDGER_RESET_OVERALL"] = {
     exclusive = 1,
 }
 
-StaticPopupDialogs["COMBATLEDGER_CLEAR_ON_JOIN"] = {
-    text = "Clear the Overall segment? You just joined a group.",
+-- Asked by the automatic reset rules (Events.lua); %s is the reason.
+StaticPopupDialogs["COMBATLEDGER_CLEAR_OVERALL"] = {
+    text = "Clear the Overall segment?\n%s",
     button1 = "Yes",
     button2 = "No",
     OnAccept = function()
