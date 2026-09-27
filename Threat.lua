@@ -9,13 +9,11 @@
     TWThreat's supported range: TWThreat exposes 5-11 visible bars and
     requests visibleBars - 1, so the largest valid request is 10.
 
-    Fallback path: EstimateThreat() below computes threat locally from
-    CombatLedger's own already-tracked damage/healing data, the same
-    approach GreedMeter's Threat.lua uses (confirmed via its own source -
-    "Uses the server threat addon API when available; otherwise
-    estimates from meter data"). Runs whenever a poll happens but no
-    real reply has landed recently, so the real API (on the rare group
-    that happens to satisfy it) always wins when available.
+    Fallback path: EstimateThreat() below reads a local threat ledger fed
+    per event by Aggregator (NoteDamage/NoteHealing) and SPELL_GO - see
+    the "Local threat estimation" section. Runs whenever a poll happens
+    but no real reply has landed recently, so the real API always wins
+    when available.
 
     Threat has no "Overall" or "History" - it's always a live snapshot
     of whatever the server just reported (or was last estimated) for the
@@ -53,34 +51,29 @@ local lastUpdate = 0
 
 -- ============================================================
 -- Local threat estimation (fallback when no real server reply arrives -
--- see this file's header comment for why that's needed at all). This is
--- deliberately owned entirely by Threat.lua: it reads Aggregator's
--- already-existing per-target buckets, but never writes to them, so no
--- Damage/Healing/History mode is changed by the estimator.
+-- see this file's header comment for why that's needed at all). Only a
+-- TWTv4 server reply is truth; this is a best-effort estimate.
 --
--- Nampower gives us target GUIDs for every damage event and exposes the
--- spell DBC plus SPELL_GO. That is enough to keep the fallback scoped to
--- the selected enemy and to account for explicit THREAT/THREAT_ALL spell
--- effects (Sunder-style zero-damage threat) without guessing from combat
--- text. It is still an estimate -- only a TWTv4 server reply is truth.
+-- Threat is accumulated per event into its own ledger, never read back
+-- from Aggregator's merged totals:
+--   ledger[enemyGuid][actorGuid] = threat, modifiers already applied
+-- That keeps pets as their own actors (a pet's threat belongs to the
+-- pet, not its owner - Aggregator rolls pet damage into the owner's
+-- bar, which is right for Damage Done but wrong here) and applies each
+-- actor's stance/form/buff modifiers as they were when the hit landed,
+-- not whatever they happen to be when the estimate is displayed.
+--
+-- Modelled: damage (with per-ability threat multipliers), explicit DBC
+-- threat effects (Sunder Armor/Taunt-style, via SPELL_GO), healing
+-- (0.5 per effective point, split across engaged enemies), Rogue's
+-- innate 0.71, Warrior stances, Druid Bear/Cat Form, Blessing of
+-- Salvation and Righteous Fury. NOT modelled: talents (Defiance, Feral
+-- Instinct, Silent Resolve, Improved Righteous Fury, ...), items and
+-- threat-drop abilities (Feign Death, Vanish, Fade).
 -- ============================================================
 
--- Class baseline threat-generation modifiers (relative, not absolute)
-local CLASS_THREAT_MOD = {
-    WARRIOR = 1.15,
-    PALADIN = 1.10,
-    DRUID   = 1.05,
-    ROGUE   = 0.71,
-    HUNTER  = 0.65,
-    MAGE    = 0.70,
-    WARLOCK = 0.72,
-    PRIEST  = 0.55,
-    SHAMAN  = 0.75,
-}
-
 -- Damage abilities with higher-than-normal threat coefficients (1.12
--- approximations) - applied to that spell's damage total already
--- tracked in Aggregator's per-spell breakdown.
+-- approximations).
 local SPELL_DAMAGE_THREAT_MULT = {
     ["Mind Blast"] = 2.00,
     ["Searing Pain"] = 2.00,
@@ -103,6 +96,34 @@ local SPELL_EFFECT_THREAT = 63
 local SPELL_EFFECT_THREAT_ALL = 91
 local SPELL_ATTR_EX_NO_THREAT = 1024 -- 0x00000400
 
+local SCHOOL_HOLY = 1
+local HEAL_THREAT_PER_POINT = 0.5
+
+local STANCE_MOD = { defensive = 1.3, battle = 0.8, berserker = 0.8 }
+local FORM_MOD = { bear = 1.3, cat = 0.71 }
+local ROGUE_MOD = 0.71
+local SALVATION_MOD = 0.7
+local RIGHTEOUS_FURY_MOD = 1.6
+
+-- Warrior stance, learned from SPELL_GO: the stance spells themselves,
+-- plus abilities usable in only one stance (which also covers a warrior
+-- who was already in stance before we started watching).
+local STANCE_SPELL_IDS = { [2457] = "battle", [71] = "defensive", [2458] = "berserker" }
+local STANCE_LOCKED_ABILITIES = {
+    ["Revenge"] = "defensive", ["Shield Block"] = "defensive", ["Shield Wall"] = "defensive",
+    ["Taunt"] = "defensive", ["Disarm"] = "defensive",
+    ["Overpower"] = "battle", ["Mocking Blow"] = "battle", ["Retaliation"] = "battle",
+    ["Charge"] = "battle", ["Thunder Clap"] = "battle",
+    ["Whirlwind"] = "berserker", ["Intercept"] = "berserker", ["Berserker Rage"] = "berserker",
+    ["Recklessness"] = "berserker", ["Pummel"] = "berserker",
+}
+-- Shapeshift-bar icons are locale-free; used for the player's own stance.
+local STANCE_ICONS = {
+    ["Ability_Warrior_OffensiveStance"] = "battle",
+    ["Ability_Warrior_DefensiveStance"] = "defensive",
+    ["Ability_Racial_Avatar"] = "berserker",
+}
+
 local ZERO_GUID = "0x0000000000000000"
 
 local function ValidGuid(guid)
@@ -116,216 +137,235 @@ local function SpellField(spellId, field)
     return nil
 end
 
+local function IsTrackedGuid(guid)
+    return guid and CL.GuidCache and CL.GuidCache.IsTracked(guid)
+end
+
+-- Per-spellId DBC lookups, cached - they run on every tracked damage
+-- event and cast, and a spell's DBC record never changes.
+local hasThreatCache = {}
 local function SpellHasInitialDamageThreat(spellId)
     if not spellId or spellId < 0 then return true end
-    local attributesEx = tonumber(SpellField(spellId, "attributesEx")) or 0
-    if CL.HasBit and CL.HasBit(attributesEx, SPELL_ATTR_EX_NO_THREAT) then return false end
-    return true
+    local cached = hasThreatCache[spellId]
+    if cached == nil then
+        local attributesEx = tonumber(SpellField(spellId, "attributesEx")) or 0
+        cached = not CL.HasBit(attributesEx, SPELL_ATTR_EX_NO_THREAT)
+        hasThreatCache[spellId] = cached
+    end
+    return cached
 end
 
-local function SpellDamageThreatMult(spell, spellId)
+local function SpellDamageThreatMult(spellName, spellId)
     if not SpellHasInitialDamageThreat(spellId) then return 0 end
-    if not spell or spell == "" then return 1.0 end
-    local m = SPELL_DAMAGE_THREAT_MULT[spell]
-    if m then return m end
-    local key, mult
-    for key, mult in pairs(SPELL_DAMAGE_THREAT_MULT) do
-        if string.find(spell, key, 1, true) then
-            return mult
-        end
-    end
-    return 1.0
-end
-
--- Threat that does not have a damage number (SPELL_EFFECT_THREAT and
--- SPELL_EFFECT_THREAT_ALL) is kept here, completely separate from the
--- Aggregator used by every other meter mode:
---   [enemyGuid][rosterGuid] = threat delta
-local explicitThreat = {}
-local deadEnemies = {}
-local healingSeenTotals = {}
-
-local function AttributedGuid(guid)
-    if CL.GuidCache and CL.GuidCache.GetOwner then
-        local owner = CL.GuidCache.GetOwner(guid)
-        if owner then return owner end
-    end
-    return guid
-end
-
-local function IsTrackedGuid(guid)
-    return guid and CL.GuidCache and CL.GuidCache.IsTracked and CL.GuidCache.IsTracked(AttributedGuid(guid))
-end
-
-local function AddExplicitThreat(enemyGuid, actorGuid, amount)
-    enemyGuid = AttributedGuid(enemyGuid)
-    actorGuid = AttributedGuid(actorGuid)
-    amount = tonumber(amount) or 0
-    if not ValidGuid(enemyGuid) or not IsTrackedGuid(actorGuid) or amount == 0 then return end
-    local byActor = explicitThreat[enemyGuid]
-    if not byActor then
-        byActor = {}
-        explicitThreat[enemyGuid] = byActor
-    end
-    byActor[actorGuid] = math.max(0, (byActor[actorGuid] or 0) + amount)
+    return (spellName and SPELL_DAMAGE_THREAT_MULT[spellName]) or 1.0
 end
 
 -- Returns the target-specific and all-engaged-enemy threat encoded in a
 -- spell's DBC effects. EffectBasePoints is stored as value-1 in vanilla.
+local explicitThreatCache = {}
 local function ExplicitSpellThreat(spellId)
+    local cached = explicitThreatCache[spellId]
+    if cached then return cached[1], cached[2] end
+    local targetThreat, allThreat = 0, 0
     local effects = SpellField(spellId, "effect")
     local basePoints = SpellField(spellId, "effectBasePoints")
-    if type(effects) ~= "table" or type(basePoints) ~= "table" then return 0, 0 end
-    local targetThreat, allThreat = 0, 0
-    local i
-    for i = 1, 3 do
-        local effect = tonumber(effects[i])
-        local amount = (tonumber(basePoints[i]) or -1) + 1
-        if effect == SPELL_EFFECT_THREAT then
-            targetThreat = targetThreat + amount
-        elseif effect == SPELL_EFFECT_THREAT_ALL then
-            allThreat = allThreat + amount
+    if type(effects) == "table" and type(basePoints) == "table" then
+        local i
+        for i = 1, 3 do
+            local effect = tonumber(effects[i])
+            local amount = (tonumber(basePoints[i]) or -1) + 1
+            if effect == SPELL_EFFECT_THREAT then
+                targetThreat = targetThreat + amount
+            elseif effect == SPELL_EFFECT_THREAT_ALL then
+                allThreat = allThreat + amount
+            end
         end
     end
+    explicitThreatCache[spellId] = { targetThreat, allThreat }
     return targetThreat, allThreat
 end
 
-local function EnemyIsStillActive(guid)
-    if not ValidGuid(guid) or deadEnemies[guid] then return false end
-    -- A GUID may fall out of the client's live object map while still
-    -- engaged. Only exclude it when the API positively says it is dead.
-    if UnitIsDead then
-        local ok, isDead = pcall(UnitIsDead, guid)
-        if ok and isDead then return false end
+--------------------------------------------------------------------------
+-- Per-actor modifiers
+--------------------------------------------------------------------------
+
+local stanceByGuid = {} -- [warriorGuid] = "battle"/"defensive"/"berserker", from SPELL_GO
+
+-- Buff-derived state per actor, refreshed at most every BUFF_SCAN_SECONDS
+-- (a raid-wide scan per hit would be far too many UnitBuff calls).
+-- SuperWoW lets UnitBuff take a raw GUID like every other unit API here.
+local BUFF_SCAN_SECONDS = 2
+local buffState = {} -- [guid] = { at, form, salvation, righteousFury }
+
+local function ScanBuffs(guid)
+    local state = buffState[guid]
+    local now = GetTime()
+    if state and now - state.at < BUFF_SCAN_SECONDS then return state end
+    if not state then
+        state = {}
+        buffState[guid] = state
     end
-    return true
+    state.at = now
+    state.form, state.salvation, state.righteousFury = nil, false, false
+    if not UnitBuff then return state end
+    local i
+    for i = 1, 32 do
+        local ok, texture = pcall(UnitBuff, guid, i)
+        if not ok or not texture then break end
+        if string.find(texture, "BearForm", 1, true) then
+            state.form = "bear"
+        elseif string.find(texture, "CatForm", 1, true) then
+            state.form = "cat"
+        elseif string.find(texture, "Salvation", 1, true) then
+            state.salvation = true
+        elseif string.find(texture, "SealOfFury", 1, true) then
+            state.righteousFury = true
+        end
+    end
+    return state
 end
 
-local function CollectActiveEnemies(enc, includeGuid)
-    local set = {}
-    local count = 0
-    if enc and enc.units then
-        local _, u
-        for _, u in pairs(enc.units) do
-            local targets = u.damageDone and u.damageDone.targets
-            if targets then
-                local targetGuid
-                for targetGuid in pairs(targets) do
-                    if not set[targetGuid] and not IsTrackedGuid(targetGuid) and EnemyIsStillActive(targetGuid) then
-                        set[targetGuid] = true
-                        count = count + 1
-                    end
-                end
+local function PlayerStance()
+    if not GetShapeshiftFormInfo or not GetNumShapeshiftForms then return nil end
+    local i
+    for i = 1, GetNumShapeshiftForms() do
+        local icon, _, active = GetShapeshiftFormInfo(i)
+        if active and icon then
+            local key, stance
+            for key, stance in pairs(STANCE_ICONS) do
+                if string.find(icon, key, 1, true) then return stance end
             end
         end
     end
-    if ValidGuid(includeGuid) and not set[includeGuid] and EnemyIsStillActive(includeGuid) then
-        set[includeGuid] = true
-        count = count + 1
-    end
-    return set, math.max(1, count)
+    return nil
 end
 
--- Reconcile only healing that has not yet been assigned. This preserves
--- the enemy set that was active when the healing happened instead of
--- repeatedly dividing the encounter's entire healing total by whatever
--- number of enemies happen to remain alive now.
-local function ReconcileHealingThreat(enc, enemies, enemyCount)
-    if not enc or not enc.units then return end
-    local guid, u
-    for guid, u in pairs(enc.units) do
-        local total = u.healingDone and (u.healingDone.total or 0) or 0
-        local seen = healingSeenTotals[guid] or 0
-        if total < seen then seen = 0 end -- defensive encounter-reset guard
-        local delta = total - seen
-        if delta > 0 then
-            local perEnemy = (delta * 0.5) / enemyCount
-            local enemyGuid
-            for enemyGuid in pairs(enemies) do
-                AddExplicitThreat(enemyGuid, guid, perEnemy)
-            end
-        end
-        healingSeenTotals[guid] = total
-    end
-end
-
--- Compute one player's estimate against one enemy. Damage is read only
--- from damageDone.targets[targetGuid], never from encounter-wide totals.
--- Healing threat is shared across the enemies still active in this pull,
--- matching vanilla's multi-mob healing-threat behavior as closely as the
--- client-visible event stream permits.
-local function EstimateUnitThreat(u, guid, targetGuid)
-    if not u then return 0 end
+-- Total threat multiplier for one actor's action right now. school is
+-- only used for Righteous Fury (Holy). Class-based modifiers apply to
+-- players only - pets can report an internal class (UnitClass on a
+-- pet isn't meaningful here), so they get just the buff-based ones.
+local function ActorMod(guid, school)
+    local info = CL.GuidCache.Resolve(guid)
+    local classToken = info and info.isPlayer and info.classToken
     local mod = 1.0
-    if u.classToken and CLASS_THREAT_MOD[u.classToken] then
-        mod = CLASS_THREAT_MOD[u.classToken]
+    if classToken == "ROGUE" then
+        mod = ROGUE_MOD
+    elseif classToken == "WARRIOR" then
+        local stance = stanceByGuid[guid]
+        local ok, _, playerGuid = pcall(UnitExists, "player")
+        if ok and guid == playerGuid then stance = PlayerStance() or stance end
+        -- Unknown stance stays neutral rather than guessing either way.
+        mod = (stance and STANCE_MOD[stance]) or 1.0
     end
-
-    local targetBucket = u.damageDone and u.damageDone.targets and u.damageDone.targets[targetGuid]
-    local dmgThreat = 0
-    if targetBucket and targetBucket.spells then
-        local spellId, entry
-        for spellId, entry in pairs(targetBucket.spells) do
-            dmgThreat = dmgThreat + (entry.total or 0) * SpellDamageThreatMult(entry.name, spellId)
-        end
-    end
-    if targetBucket then
-        if targetBucket.melee then dmgThreat = dmgThreat + (targetBucket.melee.total or 0) end
-        if targetBucket.offhand then dmgThreat = dmgThreat + (targetBucket.offhand.total or 0) end
-        if targetBucket.petMelee then dmgThreat = dmgThreat + (targetBucket.petMelee.total or 0) end
-        if targetBucket.petOffhand then dmgThreat = dmgThreat + (targetBucket.petOffhand.total or 0) end
-    end
-
-    local extra = explicitThreat[targetGuid] and explicitThreat[targetGuid][guid] or 0
-    return (dmgThreat + extra) * mod, targetBucket
+    local buffs = ScanBuffs(guid)
+    if classToken == "DRUID" and buffs.form then mod = mod * FORM_MOD[buffs.form] end
+    if buffs.salvation then mod = mod * SALVATION_MOD end
+    if buffs.righteousFury and school == SCHOOL_HOLY then mod = mod * RIGHTEOUS_FURY_MOD end
+    return mod
 end
 
--- Populates current/tankGuid from CombatLedger's own live encounter
--- data (CL.Aggregator.GetCurrent().units) instead of a server reply.
--- Same output shape HandleThreatPacket produces, so the UI needs no
--- changes to consume either source.
+--------------------------------------------------------------------------
+-- Ledger
+--------------------------------------------------------------------------
+
+local ledger = {}           -- [enemyGuid][actorGuid] = threat
+local meleeActors = {}      -- [enemyGuid][actorGuid] = true once they've auto-attacked it
+local ledgerEncounter = nil -- the Aggregator encounter the ledger belongs to
+
+-- A new Aggregator encounter means a new pull - start a fresh ledger.
+local function SyncEncounter(enc)
+    if enc ~= ledgerEncounter then
+        ledger = {}
+        meleeActors = {}
+        ledgerEncounter = enc
+    end
+end
+
+local function AddThreat(enemyGuid, actorGuid, amount)
+    if amount == 0 or not ValidGuid(enemyGuid) or IsTrackedGuid(enemyGuid) then return end
+    local byActor = ledger[enemyGuid]
+    if not byActor then
+        byActor = {}
+        ledger[enemyGuid] = byActor
+    end
+    byActor[actorGuid] = math.max(0, (byActor[actorGuid] or 0) + amount)
+end
+
+-- Called by Aggregator.RecordDamage for every recorded hit (enc = the
+-- live encounter). spellId nil = auto-attack.
+local function NoteDamage(enc, casterGuid, targetGuid, spellId, spellName, school, amount)
+    if not IsTrackedGuid(casterGuid) or not ValidGuid(targetGuid) or IsTrackedGuid(targetGuid) then return end
+    SyncEncounter(enc)
+    AddThreat(targetGuid, casterGuid, amount * SpellDamageThreatMult(spellName, spellId) * ActorMod(casterGuid, school))
+    if not spellId then
+        local byActor = meleeActors[targetGuid]
+        if not byActor then
+            byActor = {}
+            meleeActors[targetGuid] = byActor
+        end
+        byActor[casterGuid] = true
+    end
+end
+
+-- Called by Aggregator.RecordHealing with effective (not overheal)
+-- healing: 0.5 threat per point, split across every enemy this pull
+-- has engaged that's still alive (dead ones are dropped on UNIT_DIED).
+local function NoteHealing(enc, casterGuid, effective)
+    if not IsTrackedGuid(casterGuid) or not effective or effective <= 0 then return end
+    SyncEncounter(enc)
+    local count = 0
+    local enemyGuid
+    for enemyGuid in pairs(ledger) do count = count + 1 end
+    if count == 0 then return end
+    local each = effective * HEAL_THREAT_PER_POINT * ActorMod(casterGuid, SCHOOL_HOLY) / count
+    for enemyGuid in pairs(ledger) do AddThreat(enemyGuid, casterGuid, each) end
+end
+
+-- Builds the same snapshot shape HandleThreatPacket produces, so the UI
+-- needs no changes to consume either source. The tank is whoever the
+-- enemy is actually targeting (the aggro holder the 110%/130% rule is
+-- measured against), falling back to the top of the ledger.
 local function EstimateThreat(targetGuid)
     if not ValidGuid(targetGuid) then return false end
-    local enc = CL.Aggregator and CL.Aggregator.GetCurrent and CL.Aggregator.GetCurrent()
-    if not enc or not enc.units then return false end
+    local enc = CL.Aggregator.GetCurrent()
+    if not enc or enc ~= ledgerEncounter then return false end
+    local byActor = ledger[targetGuid]
+    if not byActor then return false end
 
-    local activeEnemies, activeEnemyCount = CollectActiveEnemies(enc, targetGuid)
-    ReconcileHealingThreat(enc, activeEnemies, activeEnemyCount)
+    local okTT, existsTT, aggroGuid = pcall(UnitExists, "targettarget")
+    if not (okTT and existsTT and aggroGuid and byActor[aggroGuid]) then aggroGuid = nil end
+
     local newCurrent = {}
-    local maxThreat = 0
-    local guid, u
-    for guid, u in pairs(enc.units) do
-        local threat, targetBucket = EstimateUnitThreat(u, guid, targetGuid)
+    local maxThreat, topGuid = 0, nil
+    local actorGuid, threat
+    for actorGuid, threat in pairs(byActor) do
         if threat > 0 then
-            local melee = targetBucket and (
-                (targetBucket.melee and (targetBucket.melee.total or 0) > 0) or
-                (targetBucket.offhand and (targetBucket.offhand.total or 0) > 0) or
-                (targetBucket.petMelee and (targetBucket.petMelee.total or 0) > 0) or
-                (targetBucket.petOffhand and (targetBucket.petOffhand.total or 0) > 0)) or false
-            newCurrent[guid] = { name = u.name or guid, threat = threat, estimated = true, melee = melee }
-            if threat > maxThreat then maxThreat = threat end
+            local info = CL.GuidCache.Resolve(actorGuid)
+            newCurrent[actorGuid] = {
+                name = (info and info.name) or actorGuid,
+                threat = threat,
+                estimated = true,
+                melee = (meleeActors[targetGuid] and meleeActors[targetGuid][actorGuid]) or false,
+                tank = false,
+            }
+            if threat > maxThreat then maxThreat, topGuid = threat, actorGuid end
         end
     end
-
     if maxThreat <= 0 then return false end
 
-    local newTank = nil
-    local maxSeen = 0
-    for guid, entry in pairs(newCurrent) do
-        entry.perc = math.floor((entry.threat / maxThreat) * 100 + 0.5)
-        entry.tank = false
-        if entry.threat > maxSeen then
-            maxSeen = entry.threat
-            newTank = guid
-        end
+    local newTank = (aggroGuid and newCurrent[aggroGuid]) and aggroGuid or topGuid
+    local tankThreat = newCurrent[newTank].threat
+    newCurrent[newTank].tank = true
+    local _, entry
+    for _, entry in pairs(newCurrent) do
+        entry.perc = math.floor((entry.threat / tankThreat) * 100 + 0.5)
     end
-    if newTank then newCurrent[newTank].tank = true end
 
     current = newCurrent
     tankGuid = newTank
 
     if CL.debug then
-        CL.LogLine("[Threat] estimated target=" .. tostring(targetGuid) .. " " .. CL.TableCount(newCurrent) .. " players (no real reply for " ..
+        CL.LogLine("[Threat] estimated target=" .. tostring(targetGuid) .. " " .. CL.TableCount(newCurrent) .. " actors (no real reply for " ..
             string.format("%.1f", GetTime() - lastUpdate) .. "s)")
     end
 
@@ -459,41 +499,46 @@ local function RequestThreat()
     end
 end
 
-local function ThreatModeVisible()
-    return CL.UI and CL.UI.IsModeVisible and CL.UI.IsModeVisible("threat")
-end
-
--- SPELL_GO is used only for explicit DBC threat effects, never for the
--- damage already recorded by Aggregator. Keeping those two sources
--- separate prevents the Threat implementation from double-counting or
--- mutating Damage Done while still catching zero-damage threat spells.
+-- SPELL_GO: explicit DBC threat effects (Sunder Armor/Taunt-style
+-- zero-damage threat, never the damage Aggregator already records) and
+-- warrior stance tracking. Runs whether or not Threat mode is showing,
+-- so an estimate opened mid-fight still covers the whole pull.
 local function HandleThreatSpellGo(spellId, casterGuid, targetGuid, numTargetsHit)
-    if not ThreatModeVisible() or not IsTrackedGuid(casterGuid) then return end
     spellId = tonumber(spellId)
-    if not spellId then return end
+    if not spellId or not IsTrackedGuid(casterGuid) then return end
 
+    local info = CL.GuidCache.Resolve(casterGuid)
+    if info and info.classToken == "WARRIOR" then
+        local stance = STANCE_SPELL_IDS[spellId]
+        if not stance then
+            local name = SpellField(spellId, "name")
+            stance = name and STANCE_LOCKED_ABILITIES[name]
+        end
+        if stance then stanceByGuid[casterGuid] = stance end
+    end
+
+    local enc = CL.Aggregator.GetCurrent()
+    if not enc then return end
     local targetThreat, allThreat = ExplicitSpellThreat(spellId)
     if targetThreat == 0 and allThreat == 0 then return end
+    SyncEncounter(enc)
+    local mod = ActorMod(casterGuid)
 
     -- The SPELL_GO primary target is reliable for single-target spells.
     -- If it is absent, use the live locked target as a best-effort target
-    -- only for this explicit effect; ordinary damage always has its own
-    -- authoritative target GUID in Aggregator.
+    -- only for this explicit effect.
     if not ValidGuid(targetGuid) then
         local ok, exists, liveTargetGuid = pcall(UnitExists, "target")
         if ok and exists then targetGuid = liveTargetGuid end
     end
 
     if targetThreat ~= 0 and ValidGuid(targetGuid) and (tonumber(numTargetsHit) or 1) > 0 then
-        AddExplicitThreat(targetGuid, casterGuid, targetThreat)
+        AddThreat(targetGuid, casterGuid, targetThreat * mod)
     end
-
     if allThreat ~= 0 then
-        local enc = CL.Aggregator and CL.Aggregator.GetCurrent and CL.Aggregator.GetCurrent()
-        local enemies = CollectActiveEnemies(enc, targetGuid)
         local enemyGuid
-        for enemyGuid in pairs(enemies) do
-            AddExplicitThreat(enemyGuid, casterGuid, allThreat)
+        for enemyGuid in pairs(ledger) do
+            AddThreat(enemyGuid, casterGuid, allThreat * mod)
         end
     end
 end
@@ -503,16 +548,13 @@ f:RegisterEvent("CHAT_MSG_ADDON")
 f:RegisterEvent("PARTY_MEMBERS_CHANGED")
 f:RegisterEvent("RAID_ROSTER_UPDATE")
 f:RegisterEvent("PLAYER_ENTERING_WORLD")
-f:RegisterEvent("PLAYER_REGEN_DISABLED")
-f:RegisterEvent("PLAYER_REGEN_ENABLED")
 f:RegisterEvent("SPELL_GO_SELF")
 f:RegisterEvent("SPELL_GO_OTHER")
 f:RegisterEvent("UNIT_DIED")
 f:SetScript("OnEvent", function()
     if event == "PLAYER_ENTERING_WORLD" then
-        explicitThreat = {}
-        deadEnemies = {}
-        healingSeenTotals = {}
+        buffState = {}
+        stanceByGuid = {}
         RefreshRosterNames()
         return
     end
@@ -535,18 +577,14 @@ f:SetScript("OnEvent", function()
         RefreshRosterNames()
         return
     end
-    if event == "PLAYER_REGEN_DISABLED" then
-        deadEnemies = {}
-        return
-    end
-    if event == "PLAYER_REGEN_ENABLED" then
-        explicitThreat = {}
-        deadEnemies = {}
-        healingSeenTotals = {}
-        return
-    end
+    -- The ledger resets itself per Aggregator encounter (SyncEncounter),
+    -- so regen changes need no handling here. A dead enemy stops taking
+    -- a share of healing threat.
     if event == "UNIT_DIED" then
-        if arg1 then deadEnemies[arg1] = true end
+        if arg1 then
+            ledger[arg1] = nil
+            meleeActors[arg1] = nil
+        end
         return
     end
     if event == "SPELL_GO_SELF" or event == "SPELL_GO_OTHER" then
@@ -702,4 +740,6 @@ CL.Threat = {
     IsAvailable = function() return GroupChannel() ~= nil end,
     GetLastUpdate = function() return lastUpdate end,
     GetRosterNames = GetRosterNames,
+    NoteDamage = NoteDamage,
+    NoteHealing = NoteHealing,
 }

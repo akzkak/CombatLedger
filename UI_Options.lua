@@ -21,7 +21,7 @@ CL.UIOptions = OPT
 -- RefreshOptionsWindow reflows resetPosBtn up to sit right after
 -- however many windows actually exist, so this is a ceiling, not what
 -- most people will actually see below their last row.
-local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 628 -- +24 over the prior ceiling for the "Ask before clearing" row (join-party clear is now two checkboxes, not one)
+local WINDOW_WIDTH, WINDOW_HEIGHT = 300, 652 -- +24 over the prior ceiling for the "Ask before clearing" row (join-party clear is now two checkboxes, not one)
 local MAX_WINDOW_ROWS = 4 -- most people won't run more than 2-3 extra meter windows at once
 local ROW_HEIGHT = 24
 
@@ -626,6 +626,21 @@ local function CreateWindow()
     end)
     f.announcePullsCB = announcePullsCB
 
+    -- Same as Skada's "Merge pets into owners". Applies to data recorded
+    -- from now on (existing fights keep whatever attribution they had).
+    local mergePetsLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    y = NextY()
+    mergePetsLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
+    mergePetsLabel:SetText("Merge pets into owners")
+    local mergePetsCB = CreateFrame("CheckButton", "CombatLedgerMergePetsCB", pageAdvanced, "UICheckButtonTemplate")
+    mergePetsCB:SetWidth(20)
+    mergePetsCB:SetHeight(20)
+    mergePetsCB:SetPoint("TOPRIGHT", pageAdvanced, "TOPRIGHT", -12, -y + 3)
+    mergePetsCB:SetScript("OnClick", function()
+        CL.SetSetting("mergePets", (this:GetChecked() == 1))
+    end)
+    f.mergePetsCB = mergePetsCB
+
     local testLabel = pageAdvanced:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     y = NextY()
     testLabel:SetPoint("TOPLEFT", pageAdvanced, "TOPLEFT", 14, -y)
@@ -807,6 +822,7 @@ local function CreateWindow()
             pfUI.api.SkinCheckbox(clearOnJoinAlwaysCB)
             pfUI.api.SkinCheckbox(clearOnJoinAskCB)
             pfUI.api.SkinCheckbox(announcePullsCB)
+            pfUI.api.SkinCheckbox(mergePetsCB)
             if matchPfuiCB then pfUI.api.SkinCheckbox(matchPfuiCB) end
             pfUI.api.SkinButton(textureBtn)
             pfUI.api.SkinButton(fontBtn)
@@ -897,6 +913,7 @@ RefreshOptionsWindow = function()
     window.announceChanBtn.label:SetText(LabelForKey(CL.ANNOUNCE_CHANNELS, CL.GetSetting("announceChannel") or "auto"))
     window.announceCountStepper.value:SetText(tostring(CL.GetSetting("announceCount") or 5))
     window.announcePullsCB:SetChecked(CL.GetSetting("announcePulls") ~= false)
+    window.mergePetsCB:SetChecked(CL.GetSetting("mergePets") ~= false)
 
     window.testCB:SetChecked(CL.testMode)
     local clearMode = CL.GetSetting("clearOnJoinPartyMode")

@@ -165,6 +165,7 @@ end
 -- a separate row - redirect the guid used for bucketing, but only that;
 -- IsRelevant/roster checks elsewhere still key off the pet's own guid.
 local function AttributedGuid(guid)
+    if CL.GetSetting("mergePets") == false then return guid end
     if CL.GuidCache and CL.GuidCache.GetOwner then
         local owner = CL.GuidCache.GetOwner(guid)
         if owner then return owner end
@@ -703,6 +704,8 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
 
     RecordDamageInto(current.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
     RecordDamageInto(overall.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
+    -- Raw (un-merged) caster: threat belongs to the pet itself.
+    if CL.Threat then CL.Threat.NoteDamage(current, casterGuid, targetGuid, spellId, spellName, school, amount) end
 
     if casterGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
         RecordSeriesPoint(current, "damage", amount)
@@ -975,6 +978,7 @@ local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount,
     local unverified = not verified
     RecordHealingInto(current.units, casterGuid, targetGuid, spellId, spellName, amount, effective, overheal, isCrit, unverified)
     RecordHealingInto(overall.units, casterGuid, targetGuid, spellId, spellName, amount, effective, overheal, isCrit, unverified)
+    if CL.Threat then CL.Threat.NoteHealing(current, casterGuid, effective) end
 
     if casterGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
         RecordSeriesPoint(current, "healing", effective)
@@ -1040,12 +1044,11 @@ local function RecordInterrupt(casterGuid, targetGuid, spellId, spellName)
 end
 
 local function RecordDeath(guid)
-    local attributed = AttributedGuid(guid)
-    -- Pet deaths deliberately don't roll up to the owner here, unlike
-    -- damage/healing - a Warlock's Voidwalker dying is not the same as
-    -- the Warlock dying, and Deaths is a real UI category people will
-    -- look at directly.
-    if attributed ~= guid then return nil end
+    local attributed = guid
+    -- Pet deaths are never counted, merged or not - a Warlock's
+    -- Voidwalker dying is not the same as the Warlock dying, and Deaths
+    -- is a real UI category people will look at directly.
+    if CL.GuidCache and CL.GuidCache.GetOwner(guid) then return nil end
     if not IsTrackedGuid(attributed) then return nil end
     local u = EnsureUnit(overall.units, attributed)
     u.deaths = u.deaths + 1

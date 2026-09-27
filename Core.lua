@@ -76,6 +76,7 @@ CL.defaultSettings = {
     clearOnJoinPartyMode = "off", -- "off" / "always" / "ask" - auto-resets (or offers to reset) the Overall segment the moment you go from solo to grouped (party or raid) - see Events.lua's group-change handler
 
     announcePulls = true, -- "Pull: X (spell)" chat print at the start of a boss encounter (not regular elite trash) - see Aggregator.lua's IsBossTaggedEnemy
+    mergePets = true, -- pets roll up into their owner's bar in every meter mode (Skada's "Merge pets into owners"); off = pets get their own rows. Threat always keeps pets separate - see Threat.lua
 }
 
 -- Defensive rather than relying purely on the load-time "or {}" above:
