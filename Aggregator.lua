@@ -176,6 +176,13 @@ local function EnsureUnit(units, guid)
             deaths = 0,
         }
         units[guid] = u
+    elseif u.name == guid then
+        -- Recorded before the client knew the name (GuidCache returned
+        -- nil); fill it in once it resolves.
+        local info = CL.GuidCache and CL.GuidCache.Resolve(guid)
+        if info then
+            u.name, u.class, u.classToken, u.isPlayer = info.name, info.class, info.classToken, info.isPlayer
+        end
     end
     return u
 end

@@ -25,35 +25,40 @@ local ZERO_GUID = "0x0000000000000000"
 local cache = {}
 local STALE_TIMEOUT = 300
 
-local function Resolve(guid)
-    if not guid or guid == "" or guid == ZERO_GUID then return nil end
+-- Placeholders the client returns for a unit it knows exists but hasn't
+-- received the name of yet (common right after a loading screen). Never
+-- cached, so the next lookup tries again.
+local PLACEHOLDER_NAMES = {
+    ["Unknown"] = true,
+    ["Unknown Being"] = true,
+    ["Unknown Entity"] = true,
+}
+if UNKNOWNOBJECT then PLACEHOLDER_NAMES[UNKNOWNOBJECT] = true end
+if UKNOWNBEING then PLACEHOLDER_NAMES[UKNOWNBEING] = true end
 
-    local entry = cache[guid]
-    if entry then
-        entry.lastSeen = GetTime()
-        return entry
-    end
-
-    -- UnitName(guid) raises ("Unknown unit name") rather than returning
-    -- nil for a GUID the client can't place, so every lookup is guarded.
+-- Reads name/class/isPlayer through `unit` (a token or the GUID itself)
+-- and caches them under `guid`. Returns the entry, or nil while the name
+-- is unavailable or still a placeholder. UnitName(guid) raises ("Unknown
+-- unit name") for a GUID the client can't place, so lookups are guarded.
+local function Remember(guid, unit)
     local name
     if UnitName then
-        local ok, result = pcall(UnitName, guid)
+        local ok, result = pcall(UnitName, unit)
         if ok then name = result end
     end
-    if not name or name == "" then return nil end
+    if not name or name == "" or PLACEHOLDER_NAMES[name] then return nil end
 
-    local isPlayer = UnitIsPlayer and UnitIsPlayer(guid)
+    local isPlayer = UnitIsPlayer and UnitIsPlayer(unit)
 
     local class, classToken
     if UnitClass then
-        local ok, localized, token = pcall(UnitClass, guid)
+        local ok, localized, token = pcall(UnitClass, unit)
         if ok then
             class, classToken = localized, token
         end
     end
 
-    entry = {
+    local entry = {
         name = name,
         class = class,
         classToken = classToken,
@@ -62,6 +67,17 @@ local function Resolve(guid)
     }
     cache[guid] = entry
     return entry
+end
+
+local function Resolve(guid)
+    if not guid or guid == "" or guid == ZERO_GUID then return nil end
+
+    local entry = cache[guid]
+    if entry then
+        entry.lastSeen = GetTime()
+        return entry
+    end
+    return Remember(guid, guid)
 end
 
 local function Purge()
@@ -92,10 +108,13 @@ local petOwner = {} -- [petGuid] = ownerGuid
 
 -- Guarded so one bad token can't abort a rebuild halfway and leave the
 -- roster partial. ownerUnit (pets only) records the pet -> owner link.
+-- Roster names are cached through the unit token, which resolves even
+-- when a lookup by GUID would still return a placeholder.
 local function AddUnit(unit, ownerUnit)
     local ok, exists, guid = pcall(UnitExists, unit)
     if ok and exists and guid then
         tracked[guid] = true
+        Remember(guid, unit)
         if ownerUnit then
             local ownerOk, ownerExists, ownerGuid = pcall(UnitExists, ownerUnit)
             if ownerOk and ownerExists and ownerGuid then
