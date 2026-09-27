@@ -31,6 +31,13 @@ local CL = CombatLedger
 
 local current = nil -- the live encounter, or nil if not in one
 
+-- Bumped by every mutator below (Record*, encounter start/end, resets,
+-- restore) - UI_MainWindow.lua's refresh loop skips redrawing a window
+-- whose data hasn't changed since it last drew. May over-count (a
+-- Record* that ends up filtering its event out still bumps it), never
+-- under-count, which is the safe direction.
+local dataVersion = 0
+
 -- startTime uses GetTime() (session-relative float, matches what the live
 -- meter and PrintStatus subtract it against for elapsed/DPS math) - not
 -- time() (epoch seconds): a time()-based startTime would make
@@ -280,6 +287,7 @@ local lastFinishedTime = nil -- GetTime() when lastFinished was set - see Should
 local bossTagCache = {} -- [enemyGuid] = true/false, see IsBossTaggedEnemyCached - cleared per encounter
 
 local function StartEncounter()
+    dataVersion = dataVersion + 1
     if current then return end
     current = NewEncounter()
     bossTagCache = {}
@@ -360,6 +368,7 @@ local function GetOverall()
 end
 
 local function ResetOverall()
+    dataVersion = dataVersion + 1
     overall = NewEncounter()
 end
 
@@ -436,6 +445,7 @@ end
 -- accumulated number, not a GetTime()-relative one).
 local RESTORE_STALE_SECONDS = 300
 local function RestoreState(saved)
+    dataVersion = dataVersion + 1
     if not saved then return end
     if saved.overall then
         overall = saved.overall
@@ -473,6 +483,7 @@ end
 -- Only ever shrinks duration, never extends it, and only when the last
 -- activity actually falls inside this encounter's own span.
 local function EndEncounter(lastActivityTime)
+    dataVersion = dataVersion + 1
     if not current then return nil end
     current.duration = GetTime() - current.startTime
     if lastActivityTime and lastActivityTime >= current.startTime and lastActivityTime < GetTime() then
@@ -702,6 +713,7 @@ end
 
 -- `mit` (optional): see ApplyMitigation.
 local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
+    dataVersion = dataVersion + 1
     if not current then
         if not ShouldLazyStart() then return end
         StartEncounter()
@@ -806,6 +818,7 @@ local function RecordCastInto(units, casterGuid, spellId, spellName)
 end
 
 local function RecordCast(casterGuid, spellId, spellName)
+    dataVersion = dataVersion + 1
     -- Deliberately does NOT lazy-start like RecordDamage/RecordHealing/
     -- etc. do - AURA_CAST fires for every buff/heal cast on a tracked
     -- unit, not just combat spells (confirmed via debug log: a priest's
@@ -862,6 +875,7 @@ end
 -- `mit` carries a fully blocked/absorbed swing's amount; fullAbsorb
 -- counts a "normal" 0-damage swing a shield soaked as "absorb".
 local function RecordAvoidance(casterGuid, targetGuid, victimState, isOffhand, mit, fullAbsorb)
+    dataVersion = dataVersion + 1
     if not current then
         if not ShouldLazyStart() then return end
         StartEncounter()
@@ -949,6 +963,7 @@ end
 -- A spell (including yellow melee specials like Sinister Strike) that
 -- missed/was resisted/dodged/etc. - SPELL_MISS_SELF/OTHER.
 local function RecordSpellMiss(casterGuid, targetGuid, spellId, missInfo)
+    dataVersion = dataVersion + 1
     if not spellId then return end
     if not current then
         if not ShouldLazyStart() then return end
@@ -983,6 +998,7 @@ end
 -- amount = raw heal from the event; effective/overheal come from
 -- Events.lua's target-health estimate (verified = health was readable).
 local function RecordHealing(casterGuid, targetGuid, spellId, spellName, amount, effective, overheal, isCrit, verified)
+    dataVersion = dataVersion + 1
     -- Lazy-starts only while the player or group is actually in combat
     -- (a healer standing back while the tank pulls). Out-of-combat
     -- top-offs and trailing HoT ticks after a pull are not evidence of a
@@ -1031,6 +1047,7 @@ local function RecordCountEventInto(units, bucketKey, casterGuid, targetGuid, sp
 end
 
 local function RecordCleanse(casterGuid, targetGuid, spellId, spellName)
+    dataVersion = dataVersion + 1
     -- Same combat-gated lazy-start as RecordHealing: dispels also
     -- happen out of combat and are only evidence of a fight when the
     -- player or group is actually fighting.
@@ -1043,6 +1060,7 @@ local function RecordCleanse(casterGuid, targetGuid, spellId, spellName)
 end
 
 local function RecordDebuffGiven(casterGuid, targetGuid, spellId, spellName)
+    dataVersion = dataVersion + 1
     if not current then
         if not ShouldLazyStart() then return end
         StartEncounter()
@@ -1052,6 +1070,7 @@ local function RecordDebuffGiven(casterGuid, targetGuid, spellId, spellName)
 end
 
 local function RecordInterrupt(casterGuid, targetGuid, spellId, spellName)
+    dataVersion = dataVersion + 1
     if not current then
         if not ShouldLazyStart() then return end
         StartEncounter()
@@ -1061,6 +1080,7 @@ local function RecordInterrupt(casterGuid, targetGuid, spellId, spellName)
 end
 
 local function RecordDeath(guid)
+    dataVersion = dataVersion + 1
     local attributed = guid
     -- Pet deaths are never counted, merged or not - a Warlock's
     -- Voidwalker dying is not the same as the Warlock dying, and Deaths
@@ -1256,6 +1276,7 @@ CL.Aggregator = {
     GetOverall = GetOverall,
     GetOverallDuration = GetOverallDuration,
     ResetOverall = ResetOverall,
+    GetDataVersion = function() return dataVersion end,
     GetDeathRecap = GetDeathRecap,
     SnapshotDeathRecap = SnapshotDeathRecap, -- exposed for /cl testdeath - doesn't touch the real death counter
     RecordDamage = RecordDamage,

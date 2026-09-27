@@ -32,6 +32,7 @@ local MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT = 160, 100
 local MAX_WINDOW_WIDTH, MAX_WINDOW_HEIGHT = 500, 600
 
 local REFRESH_INTERVAL = 0.2
+local IDLE_REFRESH_SECONDS = 2 -- see the refresh driver at the bottom of this file
 
 -- "Buffs Given" was built (same mechanism as Debuffs) but is hidden -
 -- prebuffing happens out of combat, before the encounter it's for even
@@ -118,16 +119,35 @@ local function MetricTotal(u, mode)
     return (u.damageDone and u.damageDone.total) or 0
 end
 
-local function BuildSortedList(units, mode)
-    local list = {}
+local function SortByTotalDesc(a, b) return a.total > b.total end
+
+-- `out` (optional) is a list to refill in place - RefreshInstance passes
+-- its own per-window one so a redraw reuses the same entry tables
+-- instead of allocating a fresh table per unit every time. Only ever
+-- filled by direct index assignment (never table.insert/remove, whose
+-- Lua 5.0 setn bookkeeping would go stale), and trailing entries from a
+-- longer previous list are cleared so table.getn stays right.
+local function BuildSortedList(units, mode, out)
+    local list = out or {}
+    local n = 0
     local guid, u
     for guid, u in pairs(units) do
         local val = MetricTotal(u, mode)
         if val > 0 then
-            table.insert(list, { guid = guid, name = u.name, classToken = u.classToken, total = val })
+            n = n + 1
+            local e = list[n]
+            if not e then
+                e = {}
+                list[n] = e
+            end
+            e.guid, e.name, e.classToken, e.total = guid, u.name, u.classToken, val
         end
     end
-    table.sort(list, function(a, b) return a.total > b.total end)
+    local i
+    for i = table.getn(list), n + 1, -1 do
+        list[i] = nil
+    end
+    table.sort(list, SortByTotalDesc)
 
     return list
 end
@@ -1253,12 +1273,18 @@ RefreshInstance = function(inst)
     local enc, list, threatMarker
     local duration = 1
 
+    -- What this draw reflects - the refresh loop (see the driver at the
+    -- bottom of this file) skips windows whose data hasn't moved on.
+    inst.drawnVersion = CL.Aggregator.GetDataVersion()
+    inst.drawnAt = GetTime()
+
     if isThreat then
         list, threatMarker = BuildThreatList(window.threatFilter)
     else
         enc = GetActiveEncounter(inst)
         local units = enc and enc.units or {}
-        list = BuildSortedList(units, window.mode)
+        inst.sortedList = inst.sortedList or {}
+        list = BuildSortedList(units, window.mode, inst.sortedList)
 
         if window.segment == "overall" then
             -- Active-combat time only, frozen between fights - see
@@ -1833,8 +1859,25 @@ driver:SetScript("OnUpdate", function()
     accum = accum + arg1
     if accum < REFRESH_INTERVAL then return end
     accum = 0
+    local now = GetTime()
+    local version = CL.Aggregator.GetDataVersion()
+    local live = CL.Aggregator.GetCurrent() ~= nil
     for id, inst in pairs(instances) do
-        RefreshInstance(inst)
+        local window = inst.frame
+        if window and window:IsShown() then
+            -- Redraw only when something could have changed: new data,
+            -- or a live fight on a Current/Overall view (the rate column
+            -- divides by a duration that keeps growing with no new
+            -- events). Threat mode redraws itself when a snapshot lands
+            -- (UI.RefreshMode). IDLE_REFRESH_SECONDS is a slow safety net
+            -- for anything that changes without going through either
+            -- (a late-resolving name, etc).
+            local timeDriven = live and window.mode ~= "threat" and window.segment ~= "history"
+            if inst.drawnVersion ~= version or timeDriven
+                or not inst.drawnAt or (now - inst.drawnAt) >= IDLE_REFRESH_SECONDS then
+                RefreshInstance(inst)
+            end
+        end
     end
 end)
 

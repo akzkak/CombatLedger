@@ -46,6 +46,8 @@ local MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT = 360, 240
 local MAX_WINDOW_WIDTH, MAX_WINDOW_HEIGHT = 700, 600
 
 local REFRESH_INTERVAL = 0.2
+local IDLE_REFRESH_SECONDS = 2 -- same redraw gating as UI_MainWindow.lua's driver
+local drawnVersion, drawnAt = nil, nil -- what the last BD.Refresh reflected
 
 -- "Buffs Given" was built (same mechanism as Debuffs) but is hidden -
 -- see Aggregator.lua/UI_MainWindow's own note.
@@ -901,6 +903,8 @@ end
 function BD.Refresh()
     if not window or not window:IsShown() then return end
     if not currentGuid then return end
+    drawnVersion = CL.Aggregator.GetDataVersion()
+    drawnAt = GetTime()
 
     local mode, segment, enc = ResolveActiveState()
 
@@ -1170,5 +1174,14 @@ driver:SetScript("OnUpdate", function()
     accum = accum + arg1
     if accum < REFRESH_INTERVAL then return end
     accum = 0
-    BD.Refresh()
+    if not window or not window:IsShown() then return end
+    -- Same rule as the main window's driver: redraw on new data, every
+    -- tick during a live fight on a Current/Overall view (rates divide
+    -- by a still-growing duration), else only as a slow safety net.
+    local now = GetTime()
+    local timeDriven = CL.Aggregator.GetCurrent() ~= nil and currentSegment ~= "history"
+    if drawnVersion ~= CL.Aggregator.GetDataVersion() or timeDriven
+        or not drawnAt or (now - drawnAt) >= IDLE_REFRESH_SECONDS then
+        BD.Refresh()
+    end
 end)
