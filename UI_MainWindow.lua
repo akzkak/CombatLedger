@@ -418,6 +418,10 @@ local function ShowBarTooltip(inst, bar)
                 GameTooltip:AddLine(summary, 0.7, 0.7, 0.7)
             end
 
+            CL.AddMitigationLines(bucket, hits, function(label, value)
+                GameTooltip:AddDoubleLine(label, value, 1, 1, 1, 1, 1, 1)
+            end)
+
             -- Spell misses (SPELL_MISS_*) - a count only, since a spell's
             -- hit total mixes direct hits with DoT ticks and wouldn't be a
             -- fair denominator here (the breakdown window does it per spell).

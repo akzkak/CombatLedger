@@ -60,6 +60,28 @@ local function TouchActivity()
     lastEventTime = GetTime()
 end
 
+-- Mitigation for the event being handled, passed to Aggregator.
+-- RecordDamage/RecordAvoidance (see Aggregator.lua's ApplyMitigation).
+-- One reused scratch table rather than a new one per event - Record*
+-- reads it synchronously and never keeps a reference. FillMitigation
+-- returns nil when nothing was mitigated, so the common case costs
+-- nothing downstream.
+local mitScratch = {}
+local function FillMitigation(absorbed, blocked, resisted, glancing, crushing)
+    absorbed = tonumber(absorbed) or 0
+    blocked = tonumber(blocked) or 0
+    resisted = tonumber(resisted) or 0
+    if absorbed <= 0 and blocked <= 0 and resisted <= 0 and not glancing and not crushing then
+        return nil
+    end
+    mitScratch.absorbed = absorbed
+    mitScratch.blocked = blocked
+    mitScratch.resisted = resisted
+    mitScratch.glancing = glancing
+    mitScratch.crushing = crushing
+    return mitScratch
+end
+
 local function HandleAutoAttack(isSelf, attackerGuid, targetGuid, totalDamage, hitInfo, victimState, componentCount, blocked, absorbed, resisted)
     totalDamage = tonumber(totalDamage) or 0
     hitInfo = tonumber(hitInfo)
@@ -82,18 +104,25 @@ local function HandleAutoAttack(isSelf, attackerGuid, targetGuid, totalDamage, h
             tostring(hitInfo), tostring(victimState), tostring(componentCount),
             tostring(blocked), tostring(absorbed), tostring(resisted)))
     end
+    if not relevant then return end
     local isOffhand = CL.HasBit(hitInfo, CL.AUTO_ATTACK_HITFLAG_OFFHAND)
-    if relevant and totalDamage > 0 then
-        -- See Core.lua for bit meanings - glancing/crushing aren't
-        -- tracked as their own stat; only crit feeds into isCrit.
+    -- totalDamage is already net of absorb/block/resist (confirmed via
+    -- debug log: dmg=43 absorbed=8), so those are extra, not subtracted.
+    local mit = FillMitigation(absorbed, blocked, resisted,
+        CL.HasBit(hitInfo, CL.AUTO_ATTACK_HITFLAG_GLANCING),
+        CL.HasBit(hitInfo, CL.AUTO_ATTACK_HITFLAG_CRUSHING))
+    if totalDamage > 0 then
         local isCrit = CL.HasBit(hitInfo, CL.AUTO_ATTACK_HITFLAG_CRIT)
-        CL.Aggregator.RecordDamage(attackerGuid, targetGuid, nil, nil, nil, totalDamage, isCrit, isOffhand)
-    elseif relevant and totalDamage == 0 then
+        CL.Aggregator.RecordDamage(attackerGuid, targetGuid, nil, nil, nil, totalDamage, isCrit, isOffhand, nil, mit)
+    else
         -- dmg=0 auto-attacks are avoided swings (dodge/parry/miss/etc,
         -- not "0 damage hits") - see Core.lua's VICTIMSTATE_* comment.
         -- Off-hand misses carry the same 0x04 bit (hitInfo=20 = 0x14 =
-        -- miss|offhand).
-        CL.Aggregator.RecordAvoidance(attackerGuid, targetGuid, tonumber(victimState), isOffhand)
+        -- miss|offhand). A swing fully soaked by a shield comes through
+        -- as a "normal" victimState with 0 damage - count it as absorb.
+        victimState = tonumber(victimState)
+        local fullAbsorb = victimState == CL.VICTIMSTATE_NORMAL and mit and mit.absorbed > 0
+        CL.Aggregator.RecordAvoidance(attackerGuid, targetGuid, victimState, isOffhand, mit, fullAbsorb)
     end
 end
 
@@ -143,6 +172,18 @@ local function IsPeriodicEffect(effectStr, spellId)
     return PERIODIC_AURA_TYPES[fields[4]] == true
 end
 
+-- SPELL_DAMAGE_EVENT's mitigation argument is "absorb,block,resist"
+-- (confirmed via debug log: a flat ~15% absorb aura showed up as
+-- dmg=65 mitigation=12,0,0 on spells and absorbed=8 on the same
+-- player's melee hits taken). string.find captures instead of a split,
+-- so no table per event.
+local function ParseSpellMitigation(text)
+    if type(text) ~= "string" then return nil end
+    local _, _, absorbed, blocked, resisted = string.find(text, "^(%d+),(%d+),(%d+)")
+    if not absorbed then return nil end
+    return FillMitigation(absorbed, blocked, resisted)
+end
+
 local function HandleSpellDamage(isSelf, targetGuid, casterGuid, spellId, amount, mitigation, hitInfo, school, effect)
     amount = tonumber(amount) or 0
     spellId = tonumber(spellId)
@@ -159,7 +200,8 @@ local function HandleSpellDamage(isSelf, targetGuid, casterGuid, spellId, amount
     if relevant and amount > 0 then
         local isCrit = CL.HasBit(hitInfo, CL.SPELL_DAMAGE_HITFLAG_CRIT)
         local isPeriodic = IsPeriodicEffect(effect, spellId)
-        CL.Aggregator.RecordDamage(casterGuid, targetGuid, spellId, name, school, amount, isCrit, nil, isPeriodic)
+        CL.Aggregator.RecordDamage(casterGuid, targetGuid, spellId, name, school, amount, isCrit, nil, isPeriodic,
+            ParseSpellMitigation(mitigation))
     end
 end
 
@@ -569,11 +611,11 @@ f:SetScript("OnEvent", function()
     end
 
     if event == "AUTO_ATTACK_SELF" then
-        HandleAutoAttack(true, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+        HandleAutoAttack(true, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9)
         return
     end
     if event == "AUTO_ATTACK_OTHER" then
-        HandleAutoAttack(false, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+        HandleAutoAttack(false, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9)
         return
     end
 

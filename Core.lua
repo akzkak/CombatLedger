@@ -842,6 +842,37 @@ function CL.SummarizeAvoided(av)
     return total, table.concat(parts, ", ")
 end
 
+-- Mitigation lines for anything carrying a `mit` table (Aggregator.lua's
+-- ApplyMitigation), shared by the main tooltip and the breakdown panel.
+-- meleeHits = the hit count glancing/crushing percentages are taken of
+-- (they only ever happen on white melee swings). addLine(label, value).
+function CL.AddMitigationLines(t, meleeHits, addLine)
+    local m = t and t.mit
+    if not m then return end
+    local function Amount(label, key)
+        local amount = m[key] or 0
+        if amount > 0 then
+            local n = m[key .. "Hits"] or 0
+            addLine(label, string.format("%s (%d %s)", CL.FormatNumber(amount), n, (n == 1) and "hit" or "hits"))
+        end
+    end
+    local function Count(label, key)
+        local n = m[key] or 0
+        if n > 0 then
+            if meleeHits and meleeHits > 0 then
+                addLine(label, string.format("%d (%.0f%%)", n, n / meleeHits * 100))
+            else
+                addLine(label, tostring(n))
+            end
+        end
+    end
+    Amount("Absorbed", "absorbed")
+    Amount("Blocked", "blocked")
+    Amount("Resisted", "resisted")
+    Count("Glancing", "glancing")
+    Count("Crushing", "crushing")
+end
+
 -- Appearance-changed pub/sub - each UI file registers a listener that
 -- re-applies font/texture/bar-height/number-format to its own pooled
 -- bars; Options fires this once after any change so every open window

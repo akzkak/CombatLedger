@@ -552,6 +552,37 @@ local function MeleeEntryFor(bucket, isPet, isOffhand)
     return isOffhand and bucket.offhand or bucket.melee
 end
 
+-- Mitigation observed on a hit (see Events.lua's FillMitigation): amounts
+-- absorbed/blocked/resisted plus how many hits each affected, and
+-- glancing/crushing counts. Kept in a lazily created `mit` subtable on
+-- whatever it's applied to (bucket, per-target entry, spell/melee
+-- entry), so units that never see mitigation carry no extra tables.
+local function AddMitAmount(m, key, amount)
+    if amount and amount > 0 then
+        m[key] = (m[key] or 0) + amount
+        m[key .. "Hits"] = (m[key .. "Hits"] or 0) + 1
+    end
+end
+
+local function ApplyMitigation(t, mit)
+    if not mit then return end
+    local m = t.mit
+    if not m then
+        m = {}
+        t.mit = m
+    end
+    AddMitAmount(m, "absorbed", mit.absorbed)
+    AddMitAmount(m, "blocked", mit.blocked)
+    AddMitAmount(m, "resisted", mit.resisted)
+    if mit.glancing then m.glancing = (m.glancing or 0) + 1 end
+    if mit.crushing then m.crushing = (m.crushing or 0) + 1 end
+end
+
+local function RecordDamageHit(entry, amount, isCrit, mit)
+    RecordHit(entry, amount, isCrit)
+    ApplyMitigation(entry, mit)
+end
+
 -- A per-target (damageDone.targets) or per-attacker (damageTaken.targets)
 -- entry. Same shape as a damage bucket (spells/melee/offhand/pet
 -- variants) so clicking it in the UI reuses the exact same per-ability
@@ -577,12 +608,13 @@ end
 -- mob happens to be on the other end of the hit (a mob dealing damage
 -- to you is not a "Damage Done" entry for the mob, and a mob you're
 -- hitting is not a "Damage Taken" entry for the mob).
-local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic)
+local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
     if casterGuid then
         local attributed = AttributedGuid(casterGuid)
         if IsTrackedGuid(attributed) then
             local u = EnsureUnit(units, attributed)
             u.damageDone.total = u.damageDone.total + amount
+            ApplyMitigation(u.damageDone, mit)
             if spellId then
                 local entry = EnsureSpellEntry(u.damageDone.spells, spellId, spellName, school)
                 -- A DoT's AURA_CAST (see RecordCast) can land before this
@@ -592,22 +624,23 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
                     entry.casts = (entry.casts or 0) + u.pendingCasts[spellId]
                     u.pendingCasts[spellId] = nil
                 end
-                RecordHit(entry, amount, isCrit)
+                RecordDamageHit(entry, amount, isCrit, mit)
                 RecordHit(EnsureSplitBucket(entry, isPeriodic and "tickHits" or "directHits"), amount, isCrit)
             else
-                RecordHit(MeleeEntryFor(u.damageDone, attributed ~= casterGuid, isOffhand), amount, isCrit)
+                RecordDamageHit(MeleeEntryFor(u.damageDone, attributed ~= casterGuid, isOffhand), amount, isCrit, mit)
             end
 
             if targetGuid then
                 local t = EnsureTargetEntry(u.damageDone.targets, targetGuid)
                 t.total = t.total + amount
                 t.hits = t.hits + 1
+                ApplyMitigation(t, mit)
                 if spellId then
                     local entry = EnsureSpellEntry(t.spells, spellId, spellName, school)
-                    RecordHit(entry, amount, isCrit)
+                    RecordDamageHit(entry, amount, isCrit, mit)
                     RecordHit(EnsureSplitBucket(entry, isPeriodic and "tickHits" or "directHits"), amount, isCrit)
                 else
-                    RecordHit(MeleeEntryFor(t, attributed ~= casterGuid, isOffhand), amount, isCrit)
+                    RecordDamageHit(MeleeEntryFor(t, attributed ~= casterGuid, isOffhand), amount, isCrit, mit)
                 end
             end
         end
@@ -618,12 +651,13 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
         if IsTrackedGuid(attributed) then
             local u = EnsureUnit(units, attributed)
             u.damageTaken.total = u.damageTaken.total + amount
+            ApplyMitigation(u.damageTaken, mit)
             if spellId then
                 local entry = EnsureSpellEntry(u.damageTaken.spells, spellId, spellName, school)
-                RecordHit(entry, amount, isCrit)
+                RecordDamageHit(entry, amount, isCrit, mit)
                 RecordHit(EnsureSplitBucket(entry, isPeriodic and "tickHits" or "directHits"), amount, isCrit)
             else
-                RecordHit(MeleeEntryFor(u.damageTaken, attributed ~= targetGuid, isOffhand), amount, isCrit)
+                RecordDamageHit(MeleeEntryFor(u.damageTaken, attributed ~= targetGuid, isOffhand), amount, isCrit, mit)
             end
 
             -- Who this damage actually came from (reuses damageTaken's
@@ -634,19 +668,21 @@ local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellNam
                 local s = EnsureTargetEntry(u.damageTaken.targets, casterGuid)
                 s.total = s.total + amount
                 s.hits = s.hits + 1
+                ApplyMitigation(s, mit)
                 if spellId then
                     local entry = EnsureSpellEntry(s.spells, spellId, spellName, school)
-                    RecordHit(entry, amount, isCrit)
+                    RecordDamageHit(entry, amount, isCrit, mit)
                     RecordHit(EnsureSplitBucket(entry, isPeriodic and "tickHits" or "directHits"), amount, isCrit)
                 else
-                    RecordHit(MeleeEntryFor(s, false, isOffhand), amount, isCrit)
+                    RecordDamageHit(MeleeEntryFor(s, false, isOffhand), amount, isCrit, mit)
                 end
             end
         end
     end
 end
 
-local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic)
+-- `mit` (optional): see ApplyMitigation.
+local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
     if not current then
         if not ShouldLazyStart() then return end
         StartEncounter()
@@ -665,8 +701,8 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
         end
     end
 
-    RecordDamageInto(current.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic)
-    RecordDamageInto(overall.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic)
+    RecordDamageInto(current.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
+    RecordDamageInto(overall.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
 
     if casterGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
         RecordSeriesPoint(current, "damage", amount)
@@ -776,13 +812,15 @@ local VICTIMSTATE_KEY = {
     [CL.VICTIMSTATE_DEFLECT] = "deflect",
 }
 
-local function RecordAvoidanceInto(units, casterGuid, targetGuid, key, isOffhand)
+local function RecordAvoidanceInto(units, casterGuid, targetGuid, key, isOffhand, mit)
     if casterGuid then
         local attributed = AttributedGuid(casterGuid)
         if IsTrackedGuid(attributed) then
             local u = EnsureUnit(units, attributed)
             local entry = MeleeEntryFor(u.damageDone, attributed ~= casterGuid, isOffhand)
-            entry.avoided[key] = entry.avoided[key] + 1
+            entry.avoided[key] = (entry.avoided[key] or 0) + 1
+            ApplyMitigation(entry, mit)
+            ApplyMitigation(u.damageDone, mit)
         end
     end
     if targetGuid then
@@ -790,7 +828,9 @@ local function RecordAvoidanceInto(units, casterGuid, targetGuid, key, isOffhand
         if IsTrackedGuid(attributed) then
             local u = EnsureUnit(units, attributed)
             local entry = MeleeEntryFor(u.damageTaken, attributed ~= targetGuid, isOffhand)
-            entry.avoided[key] = entry.avoided[key] + 1
+            entry.avoided[key] = (entry.avoided[key] or 0) + 1
+            ApplyMitigation(entry, mit)
+            ApplyMitigation(u.damageTaken, mit)
         end
     end
 end
@@ -799,14 +839,16 @@ end
 -- see AUTO_ATTACK's victimState in Events.lua's HandleAutoAttack. Not
 -- routed through RecordDamage since amount is always 0 here; still
 -- writes into both current and overall like every other Record* call.
-local function RecordAvoidance(casterGuid, targetGuid, victimState, isOffhand)
+-- `mit` carries a fully blocked/absorbed swing's amount; fullAbsorb
+-- counts a "normal" 0-damage swing a shield soaked as "absorb".
+local function RecordAvoidance(casterGuid, targetGuid, victimState, isOffhand, mit, fullAbsorb)
     if not current then
         if not ShouldLazyStart() then return end
         StartEncounter()
     end
-    local key = VICTIMSTATE_KEY[victimState] or "other"
-    RecordAvoidanceInto(current.units, casterGuid, targetGuid, key, isOffhand)
-    RecordAvoidanceInto(overall.units, casterGuid, targetGuid, key, isOffhand)
+    local key = fullAbsorb and "absorb" or VICTIMSTATE_KEY[victimState] or "other"
+    RecordAvoidanceInto(current.units, casterGuid, targetGuid, key, isOffhand, mit)
+    RecordAvoidanceInto(overall.units, casterGuid, targetGuid, key, isOffhand, mit)
 end
 
 -- Healing totals are EFFECTIVE healing (raw minus estimated overheal), so

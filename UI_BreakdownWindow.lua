@@ -158,6 +158,18 @@ local function BuildSpellList(bucket)
     -- both raw entries kept separately - main-hand and off-hand have
     -- different hit caps, so their miss/dodge/parry rates genuinely
     -- aren't the same number and shouldn't be blended together.
+    -- Main-hand + off-hand mitigation merged for the combined melee row
+    -- (see Aggregator.lua's ApplyMitigation) - nil if neither has any.
+    local function MergeMit(a, b)
+        if not a then return b end
+        if not b then return a end
+        local merged = {}
+        local k, v
+        for k, v in pairs(a) do merged[k] = v end
+        for k, v in pairs(b) do merged[k] = (merged[k] or 0) + v end
+        return merged
+    end
+
     local function AddCombinedMeleeEntry(key, name, mainEntry, offEntry)
         local hits = (mainEntry and mainEntry.hits or 0) + (offEntry and offEntry.hits or 0)
         if hits <= 0 then return end
@@ -182,6 +194,7 @@ local function BuildSpellList(bucket)
             mainHand = mainEntry,
             offHand = offEntry,
             isMelee = true,
+            mit = MergeMit(mainEntry and mainEntry.mit, offEntry and offEntry.mit),
         })
     end
     AddCombinedMeleeEntry("melee", "Auto Attack", bucket.melee, bucket.offhand)
@@ -217,6 +230,7 @@ local function BuildSpellList(bucket)
                 -- SPELL_MISS_* outcomes for this spell (see Aggregator.lua's
                 -- BumpSpellMiss) - kept beside, not inside, the spell entry.
                 avoided = bucket.spellMisses and bucket.spellMisses[spellId],
+                mit = s.mit,
             })
         end
     end
@@ -714,6 +728,13 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
         if totalHits > 0 then
             Line("Overall Crit", string.format("%d (%.0f%%)", totalCrits, totalCrits / totalHits * 100))
         end
+        if mode == "damage" or mode == "taken" then
+            local meleeHits = 0
+            for i = 1, table.getn(list) do
+                if list[i].isMelee then meleeHits = meleeHits + (list[i].hits or 0) end
+            end
+            CL.AddMitigationLines(bucket, meleeHits, DimLine)
+        end
         Line("Abilities", tostring(table.getn(list)))
 
         local top = list[1]
@@ -851,6 +872,8 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
             row:Show()
         end
     end
+
+    CL.AddMitigationLines(entry, entry.isMelee and entry.hits, DimLine)
 
     if entry.avoided then
         -- A DoT's ticks aren't separate attempts - one cast lands or
