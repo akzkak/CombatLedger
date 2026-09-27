@@ -49,7 +49,7 @@ local function NewEncounter()
         activeDuration = 0, -- only meaningful for `overall` (see GetOverallDuration) - sum of finished encounters' durations, so idle time between pulls doesn't dilute Overall DPS
         pullBy = nil, -- { name, label } - set once, from whoever's action started this encounter
         mobTally = {}, -- [guid] = damage dealt to it by tracked casters - label-only, not a real bar entry (mobs are deliberately excluded from units)
-        mobHealth = {}, -- [guid] = highest UnitHealthMax(guid) sampled for it - label-only, same reasoning as mobTally (see History.lua's ComputeLabel)
+        mobHealth = {}, -- [guid] = UnitHealthMax(guid), sampled once per mob - label-only, same reasoning as mobTally (see History.lua's ComputeLabel)
         -- Raid-wide shape-of-the-fight, for UI_EncounterReport's graph.
         -- Fixed-width time buckets (see RecordSeriesPoint), not a raw
         -- per-event log: a whole fight's worth of events at ~2500 events/
@@ -727,14 +727,13 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
             -- token directly (see GuidCache.lua) - UnitHealthMax(guid)
             -- resolves right here with no "target"/nameplate token
             -- needed, as long as the mob is actually in range, which it
-            -- is by definition (we just recorded a hit on it). Keep the
-            -- highest sample seen, not the latest - a mob fought down to
-            -- a sliver shouldn't end up looking small.
-            if UnitHealthMax then
+            -- is by definition (we just recorded a hit on it). Max health
+            -- doesn't change as the mob takes damage, so sample it once
+            -- per mob per encounter (0 = unreadable, not retried) rather
+            -- than on every hit.
+            if UnitHealthMax and current.mobHealth[targetAttributed] == nil then
                 local ok, maxHp = pcall(UnitHealthMax, targetAttributed)
-                if ok and maxHp and maxHp > (current.mobHealth[targetAttributed] or 0) then
-                    current.mobHealth[targetAttributed] = maxHp
-                end
+                current.mobHealth[targetAttributed] = (ok and tonumber(maxHp)) or 0
             end
         end
     end

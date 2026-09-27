@@ -30,12 +30,19 @@ end
 
 -- Best-effort spell name lookup for the breakdown UI - wrapped since
 -- GetSpellRecField's behavior isn't guaranteed for every spellId, and a
--- failure here shouldn't break event handling.
+-- failure here shouldn't break event handling. Cached per spellId (a
+-- DBC name never changes) since this runs on nearly every combat event;
+-- false marks a lookup that failed, so it isn't retried every hit.
+local spellNameCache = {}
 local function SpellName(spellId)
     if not spellId or not GetSpellRecField then return nil end
-    local ok, name = pcall(GetSpellRecField, spellId, "name")
-    if ok then return name end
-    return nil
+    local cached = spellNameCache[spellId]
+    if cached == nil then
+        local ok, name = pcall(GetSpellRecField, spellId, "name")
+        cached = (ok and type(name) == "string" and name ~= "") and name or false
+        spellNameCache[spellId] = cached
+    end
+    return cached or nil
 end
 
 -- Nampower's *_OTHER events aren't scoped to your group - without this,
@@ -155,21 +162,14 @@ local ALWAYS_PERIODIC_SPELLS = {
     [18881] = true, -- Siphon Life
 }
 
+-- The 4th field is captured with a pattern rather than splitting into a
+-- table, so this allocates nothing per spell hit. A 3-field string (no
+-- aura type) simply doesn't match.
 local function IsPeriodicEffect(effectStr, spellId)
     if ALWAYS_PERIODIC_SPELLS[spellId] then return true end
-    if not effectStr or effectStr == "" then return false end
-    local fields = {}
-    local from = 1
-    while true do
-        local pos = string.find(effectStr, ",", from, true)
-        if not pos then
-            table.insert(fields, string.sub(effectStr, from))
-            break
-        end
-        table.insert(fields, string.sub(effectStr, from, pos - 1))
-        from = pos + 1
-    end
-    return PERIODIC_AURA_TYPES[fields[4]] == true
+    if type(effectStr) ~= "string" then return false end
+    local _, _, auraType = string.find(effectStr, "^[^,]*,[^,]*,[^,]*,([^,]*)")
+    return auraType ~= nil and PERIODIC_AURA_TYPES[auraType] == true
 end
 
 -- SPELL_DAMAGE_EVENT's mitigation argument is "absorb,block,resist"
