@@ -1004,7 +1004,7 @@ local function CreateWindowFrame(inst)
             RefreshInstance(inst)
         end })
         if CL.History then
-            local hist = CL.History.GetHistory()
+            local hist = CL.History.GetShownHistory()
             local n = table.getn(hist)
             local limit = (n < 4) and n or 4 -- most recent 4 (+Current/Overall = 6 rows); full list + delete/clear lives in /cl history
             local i

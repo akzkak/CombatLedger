@@ -71,8 +71,8 @@ local function CreateRow(parent, index)
     delTex:SetAllPoints(deleteBtn)
     delTex:SetTexture("Interface\\Buttons\\UI-StopButton")
     deleteBtn:SetScript("OnClick", function()
-        if row.encounterIndex then
-            CL.History.DeleteEncounter(row.encounterIndex)
+        if row.encounterEntry then
+            CL.History.DeleteEncounter(row.encounterEntry)
             HW.Refresh()
         end
     end)
@@ -208,7 +208,7 @@ local function CreateWindow()
     rowParent:SetScript("OnMouseWheel", function()
         local delta = arg1
         if not delta then return end
-        local hist = CL.History.GetHistory()
+        local hist = CL.History.GetShownHistory()
         local fit = math.floor((rowParent:GetHeight() + ROW_GAP) / (ROW_HEIGHT + ROW_GAP))
         if fit < 1 then fit = 1 end
         local maxOff = table.getn(hist) - fit
@@ -282,7 +282,7 @@ end
 function HW.Refresh()
     if not window or not window:IsShown() then return end
 
-    local hist = CL.History.GetHistory()
+    local hist = CL.History.GetShownHistory()
     local total = table.getn(hist)
 
     local fit = math.floor((window.rowParent:GetHeight() + ROW_GAP) / (ROW_HEIGHT + ROW_GAP))
@@ -301,7 +301,6 @@ function HW.Refresh()
         local entry = (i <= fit) and hist[index] or nil
         if entry then
             shown = shown + 1
-            row.encounterIndex = index
             row.encounterEntry = entry
             row.labelText:SetText(entry.label or "Unknown")
             local durText = string.format("%.0fs", entry.duration or 0)
@@ -309,7 +308,6 @@ function HW.Refresh()
             row.subText:SetText(durText .. "  -  " .. agoText)
             row:Show()
         else
-            row.encounterIndex = nil
             row.encounterEntry = nil
             row:Hide()
         end

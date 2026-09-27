@@ -134,9 +134,37 @@ local function GetHistory()
     return list
 end
 
-local function DeleteEncounter(index)
-    local key = EnsureEncountersTable()
-    table.remove(CombatLedgerDB.encountersByChar[key], index)
+-- A saved boss fight. pullBy is only ever set for bosses, which also
+-- covers fights saved before isBoss existed.
+local function IsBossFight(encounter)
+    return encounter.isBoss or encounter.pullBy ~= nil
+end
+
+-- History as the UI lists it: while "Remember boss fights only" is on,
+-- trash fights saved before the option was turned on are hidden (not
+-- deleted - turning the option off shows them again).
+local function GetShownHistory()
+    local list = GetHistory()
+    if not CL.GetSetting("historyBossOnly") then return list end
+    local shown = {}
+    local i
+    for i = 1, table.getn(list) do
+        if IsBossFight(list[i]) then table.insert(shown, list[i]) end
+    end
+    return shown
+end
+
+-- Deletes a saved fight, identified by the encounter itself (list
+-- positions differ between the full and the shown history).
+local function DeleteEncounter(encounter)
+    local list = GetHistory()
+    local i
+    for i = 1, table.getn(list) do
+        if list[i] == encounter then
+            table.remove(list, i)
+            return
+        end
+    end
 end
 
 local function ClearHistory()
@@ -147,6 +175,8 @@ end
 CL.History = {
     SaveEncounter = SaveEncounter,
     GetHistory = GetHistory,
+    GetShownHistory = GetShownHistory,
+    IsBossFight = IsBossFight,
     DeleteEncounter = DeleteEncounter,
     ClearHistory = ClearHistory,
     TrimHistory = TrimHistory,

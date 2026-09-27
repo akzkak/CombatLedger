@@ -701,6 +701,8 @@ local function CreateWindow()
     bossOnlyCB:SetPoint("TOPRIGHT", pageData, "TOPRIGHT", -12, -y + 3)
     bossOnlyCB:SetScript("OnClick", function()
         CL.SetSetting("historyBossOnly", (this:GetChecked() == 1))
+        -- Hides or re-shows saved trash fights in the History window.
+        if CL.UIHistory and CL.UIHistory.Refresh then CL.UIHistory.Refresh() end
     end)
     f.bossOnlyCB = bossOnlyCB
 
