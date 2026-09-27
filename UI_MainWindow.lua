@@ -337,6 +337,35 @@ local function GetActiveEncounter(inst)
     return CL.Aggregator.GetCurrentDisplay()
 end
 
+-- The bar tooltip is a brief summary: each list shows its top entries
+-- and folds the rest into one "...and N more" line.
+local TOOLTIP_TOP_TARGETS = 3
+local TOOLTIP_TOP_SPELLS = 5
+
+-- Adds a titled, sorted list (entries of { name, total }) capped at
+-- `limit` rows, with percentages of `grandTotal`.
+local function AddTopList(title, list, limit, grandTotal)
+    local n = table.getn(list)
+    if n == 0 then return end
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine(title, 1, 0.82, 0)
+    local function Pct(value)
+        return (grandTotal > 0) and string.format(" (%.1f%%)", value / grandTotal * 100) or ""
+    end
+    local shown = (n > limit) and limit or n
+    local i
+    for i = 1, shown do
+        GameTooltip:AddDoubleLine(list[i].name, FormatNumber(list[i].total) .. Pct(list[i].total),
+            0.9, 0.9, 0.9, 1, 1, 1)
+    end
+    if n > shown then
+        local rest = 0
+        for i = shown + 1, n do rest = rest + list[i].total end
+        GameTooltip:AddDoubleLine("...and " .. (n - shown) .. " more", FormatNumber(rest) .. Pct(rest),
+            0.6, 0.6, 0.6, 0.6, 0.6, 0.6)
+    end
+end
+
 local function ShowBarTooltip(inst, bar)
     if not bar.guid then return end
 
@@ -446,30 +475,12 @@ local function ShowBarTooltip(inst, bar)
         end
     end
 
-    do
-        local targets = BuildTargetSummary(u, mode)
-        if table.getn(targets) > 0 then
-            GameTooltip:AddLine(" ")
-            GameTooltip:AddLine("By target:", 1, 0.82, 0)
-            local i
-            for i = 1, table.getn(targets) do
-                GameTooltip:AddDoubleLine(targets[i].name, FormatNumber(targets[i].total), 0.9, 0.9, 0.9, 1, 1, 1)
-            end
-        end
-    end
+    AddTopList("By target:", BuildTargetSummary(u, mode), TOOLTIP_TOP_TARGETS, total)
+    AddTopList("By spell:", BuildSpellSummary(u, mode), TOOLTIP_TOP_SPELLS, total)
 
-    local spells = BuildSpellSummary(u, mode)
-    if table.getn(spells) > 0 then
-        GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("By spell:", 1, 0.82, 0)
-        local i
-        for i = 1, table.getn(spells) do
-            local pct = (total > 0) and (spells[i].total / total * 100) or 0
-            GameTooltip:AddDoubleLine(spells[i].name,
-                FormatNumber(spells[i].total) .. " (" .. string.format("%.1f", pct) .. "%)", 0.9, 0.9, 0.9, 1, 1, 1)
-        end
-    end
-
+    -- The tooltip is a summary; the full lists live in the breakdown.
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine("Click for the full breakdown", 0.5, 0.5, 0.5)
     GameTooltip:Show()
 end
 
