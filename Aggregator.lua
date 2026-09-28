@@ -975,6 +975,9 @@ local function RecordDeath(guid)
     -- Pet deaths aren't counted (a pet dying isn't its owner dying).
     if CL.GuidCache and CL.GuidCache.GetOwner(guid) then return nil end
     if not IsTrackedGuid(attributed) then return nil end
+    -- Same combat-gated start as RecordHealing: a groupmate dying while
+    -- only the group is fighting belongs to that fight, not just Overall.
+    if not current and IsGroupFighting() then StartEncounter() end
     local u = EnsureUnit(overall.units, attributed)
     u.deaths = u.deaths + 1
     if current then
