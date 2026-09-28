@@ -653,15 +653,33 @@ function CL.SummarizeAvoided(av)
     return total, table.concat(parts, ", ")
 end
 
+-- Landed attempts for one spell, to compare its misses against: its
+-- hits - but for a DoT, its casts or direct hits (a tick isn't an
+-- attempt) - or, for a spell that never dealt damage (Sunder Armor,
+-- Taunt), its recorded casts from `casts` (a unit's pendingCasts). nil
+-- when nothing is known.
+local function LandedAttempts(entry, castCount)
+    if entry then
+        if entry.tickHits and entry.tickHits.hits > 0 then
+            if entry.directHits and entry.directHits.hits > 0 then return entry.directHits.hits end
+            return entry.casts or entry.hits
+        end
+        return entry.hits
+    end
+    return castCount
+end
+
 -- Miss/dodge/parry/... lines for a damage bucket (unit-wide or one
 -- target), shared by the bar tooltip and the breakdown summary:
 --   swings: white melee swings avoided out of all swings, with the split
---   spells: spell misses by outcome, as a count - a spell's hit total
---           mixes direct hits with DoT ticks, so it's no fair denominator
+--   spells: spell attempts missed out of all spell attempts (see
+--           LandedAttempts), with the split
 -- addLine(label, value) for a value row, addNote(text) for the grey split.
--- `mode` "taken" words it as avoided rather than missed. Returns the
--- number of landed melee swings (for glancing/crushing percentages).
-function CL.AddAvoidanceLines(bucket, mode, addLine, addNote)
+-- `casts` (optional) is the unit's pendingCasts, which supplies attempts
+-- for spells that never dealt damage. `mode` "taken" words it as avoided
+-- rather than missed. Returns the number of landed melee swings (for
+-- glancing/crushing percentages).
+function CL.AddAvoidanceLines(bucket, mode, addLine, addNote, casts)
     if not bucket then return 0 end
     local function AddSums(sum, av)
         local k, v
@@ -686,11 +704,28 @@ function CL.AddAvoidanceLines(bucket, mode, addLine, addNote)
 
     if bucket.spellMisses then
         local spellSum = {}
-        local av
-        for _, av in pairs(bucket.spellMisses) do AddSums(spellSum, av) end
+        local knownMisses, knownAttempts = 0, 0
+        local spellId, av
+        for spellId, av in pairs(bucket.spellMisses) do
+            AddSums(spellSum, av)
+            local missed = CL.SummarizeAvoided(av)
+            local landed = LandedAttempts(bucket.spells and bucket.spells[spellId], casts and casts[spellId])
+            if landed then
+                knownMisses = knownMisses + missed
+                knownAttempts = knownAttempts + missed + landed
+            end
+        end
         local spellAvoided, spellSummary = CL.SummarizeAvoided(spellSum)
         if spellAvoided > 0 then
-            addLine((mode == "taken") and "Spells avoided" or "Spells missed", tostring(spellAvoided))
+            local label = (mode == "taken") and "Spells avoided" or "Spells missed"
+            if knownAttempts > 0 and knownMisses == spellAvoided then
+                addLine(label, string.format("%d/%d (%.0f%%)", spellAvoided, knownAttempts,
+                    spellAvoided / knownAttempts * 100))
+            else
+                -- Some missed spells have no recorded attempts to compare
+                -- against (e.g. a filtered target), so no percentage.
+                addLine(label, tostring(spellAvoided))
+            end
             addNote(spellSummary)
         end
     end

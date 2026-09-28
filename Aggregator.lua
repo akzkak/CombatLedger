@@ -357,7 +357,6 @@ local function CompactTargets(enc)
     if not enc or not enc.units then return end
     local guid, u
     for guid, u in pairs(enc.units) do
-        u.pendingCasts = nil -- stash for a DoT whose first tick never landed - meaningless once saved
         local i
         for i = 1, table.getn(TARGET_BUCKETS) do
             local bucket = u[TARGET_BUCKETS[i]]

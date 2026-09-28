@@ -431,7 +431,8 @@ local function ShowBarTooltip(inst, bar)
         local bucket = (mode == "taken") and u.damageTaken or u.damageDone
         local hits = CL.AddAvoidanceLines(bucket, mode,
             function(label, value) GameTooltip:AddDoubleLine(label, value, 1, 1, 1, 1, 1, 1) end,
-            function(text) GameTooltip:AddLine(text, 0.7, 0.7, 0.7) end)
+            function(text) GameTooltip:AddLine(text, 0.7, 0.7, 0.7) end,
+            (mode == "damage") and u.pendingCasts or nil)
         CL.AddMitigationLines(bucket, hits, function(label, value)
             GameTooltip:AddDoubleLine(label, value, 1, 1, 1, 1, 1, 1)
         end)

@@ -619,7 +619,7 @@ end
 -- overall summary for the unit instead of just an empty placeholder -
 -- the panel has plenty of room, no reason to leave it blank until you
 -- click something.
-local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mode, filteredTargetName, bucket)
+local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mode, filteredTargetName, bucket, casts)
     if not window then return end
 
     -- Default/no-selection state - only the "specific entry selected"
@@ -720,7 +720,7 @@ local function RefreshDetailPanel(entry, list, targets, duration, unitTotal, mod
             Line("Overall Crit", string.format("%d (%.0f%%)", totalCrits, totalCrits / totalHits * 100))
         end
         if mode == "damage" or mode == "taken" then
-            local meleeHits = CL.AddAvoidanceLines(bucket, mode, Line, Note)
+            local meleeHits = CL.AddAvoidanceLines(bucket, mode, Line, Note, casts)
             CL.AddMitigationLines(bucket, meleeHits, DimLine)
         end
         Line("Abilities", tostring(table.getn(list)))
@@ -1012,7 +1012,9 @@ function BD.Refresh()
     end
 
     RefreshDetailPanel(selectedEntry, list, targets, duration, unitTotal, mode,
-        filteredTarget and filteredTarget.name, bucket)
+        filteredTarget and filteredTarget.name, bucket,
+        -- Casts of non-damage spells are only kept unit-wide.
+        (mode == "damage" and not filteredTarget and u) and u.pendingCasts or nil)
 
     -- "All Enemies" sits at slot 1 (once there's more than one target to
     -- pick from), bumping the actual target rows down one slot and one
