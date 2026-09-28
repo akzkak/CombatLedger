@@ -672,7 +672,9 @@ end
 -- Miss/dodge/parry/... lines for a damage bucket (unit-wide or one
 -- target), shared by the bar tooltip and the breakdown summary:
 --   swings: white melee swings avoided out of all swings, with the split
---   spells: spell attempts missed out of all spell attempts (see
+--   abilities: everything that isn't a white swing - spells AND melee
+--           specials (Stormstrike, Sunder Armor...), which is why dodge
+--           and parry show up here - missed out of all attempts (see
 --           LandedAttempts), with the split
 -- addLine(label, value) for a value row, addNote(text) for the grey split.
 -- `casts` (optional) is the unit's pendingCasts, which supplies attempts
@@ -717,7 +719,7 @@ function CL.AddAvoidanceLines(bucket, mode, addLine, addNote, casts)
         end
         local spellAvoided, spellSummary = CL.SummarizeAvoided(spellSum)
         if spellAvoided > 0 then
-            local label = (mode == "taken") and "Spells avoided" or "Spells missed"
+            local label = (mode == "taken") and "Abilities avoided" or "Abilities missed"
             if knownAttempts > 0 and knownMisses == spellAvoided then
                 addLine(label, string.format("%d/%d (%.0f%%)", spellAvoided, knownAttempts,
                     spellAvoided / knownAttempts * 100))
