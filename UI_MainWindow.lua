@@ -249,9 +249,19 @@ local function BuildSpellSummary(u, mode)
         table.insert(list, { name = "Pet Off-Hand", total = bucket.petOffhand.total })
     end
     if bucket.spells then
+        -- Ranks of one spell have separate spellIds - merge them by name.
+        local byName = {}
         local spellId, s
         for spellId, s in pairs(bucket.spells) do
-            table.insert(list, { name = s.name or ("Spell " .. tostring(spellId)), total = s.total })
+            local name = s.name or ("Spell " .. tostring(spellId))
+            local e = byName[name]
+            if e then
+                e.total = e.total + s.total
+            else
+                e = { name = name, total = s.total }
+                byName[name] = e
+                table.insert(list, e)
+            end
         end
     end
     table.sort(list, function(a, b) return a.total > b.total end)

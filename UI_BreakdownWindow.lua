@@ -193,38 +193,92 @@ local function BuildSpellList(bucket)
     AddCombinedMeleeEntry("melee", "Auto Attack", bucket.melee, bucket.offhand)
     AddCombinedMeleeEntry("petMelee", "Pet Auto Attack", bucket.petMelee, bucket.petOffhand)
 
+    -- Sums two optional numbers, nil only if both are nil.
+    local function AddOpt(a, b)
+        if a == nil then return b end
+        if b == nil then return a end
+        return a + b
+    end
+
+    -- Sums two hit/crit/total/min/max sub-entries (directHits/tickHits)
+    -- into a fresh table - nil if neither exists.
+    local function MergeHitBucket(a, b)
+        if not a then return b end
+        if not b then return a end
+        return {
+            hits = (a.hits or 0) + (b.hits or 0),
+            crits = (a.crits or 0) + (b.crits or 0),
+            total = (a.total or 0) + (b.total or 0),
+            critTotal = (a.critTotal or 0) + (b.critTotal or 0),
+            min = (a.min and b.min) and math.min(a.min, b.min) or (a.min or b.min),
+            max = (a.max and b.max) and math.max(a.max, b.max) or (a.max or b.max),
+        }
+    end
+
     if bucket.spells then
+        -- Every rank of a spell has its own spellId (Healing Wave 1-10...),
+        -- so ranks are merged into one row by name. The row keeps the
+        -- spellId of its biggest rank for the icon.
+        local byName = {}
         local spellId, s
         for spellId, s in pairs(bucket.spells) do
-            table.insert(list, {
-                key = "spell:" .. tostring(spellId),
-                name = s.name or ("Spell " .. tostring(spellId)),
-                hits = s.hits,
-                crits = s.crits,
-                total = s.total,
-                critTotal = s.critTotal,
-                min = s.min,
-                max = s.max,
-                spellId = spellId,
-                -- Direct-hit-vs-DoT-tick split (see Aggregator.lua's
-                -- EnsureSplitBucket / Events.lua's IsPeriodicEffect) -
-                -- nil on a spell that's never had a periodic tick.
-                directHits = s.directHits,
-                tickHits = s.tickHits,
-                -- Real cast count (see Aggregator.lua's RecordCast) -
-                -- nil on a spell that never had a cast event tracked.
-                casts = s.casts,
-                -- Healing only (see Aggregator.lua's RecordHealHit) -
-                -- total above is effective healing.
-                raw = s.raw,
-                critRaw = s.critRaw,
-                overheal = s.overheal,
-                unverified = s.unverified,
-                -- SPELL_MISS_* outcomes for this spell (see Aggregator.lua's
-                -- BumpSpellMiss) - kept beside, not inside, the spell entry.
-                avoided = bucket.spellMisses and bucket.spellMisses[spellId],
-                mit = s.mit,
-            })
+            local name = s.name or ("Spell " .. tostring(spellId))
+            local avoided = bucket.spellMisses and bucket.spellMisses[spellId]
+            local e = byName[name]
+            if not e then
+                e = {
+                    key = "spell:" .. name,
+                    name = name,
+                    hits = s.hits,
+                    crits = s.crits,
+                    total = s.total,
+                    critTotal = s.critTotal,
+                    min = s.min,
+                    max = s.max,
+                    spellId = spellId,
+                    -- Direct-hit-vs-DoT-tick split (see Aggregator.lua's
+                    -- EnsureSplitBucket / Events.lua's IsPeriodicEffect) -
+                    -- nil on a spell that's never had a periodic tick.
+                    directHits = s.directHits,
+                    tickHits = s.tickHits,
+                    -- Real cast count (see Aggregator.lua's RecordCast) -
+                    -- nil on a spell that never had a cast event tracked.
+                    casts = s.casts,
+                    -- Healing only (see Aggregator.lua's RecordHealHit) -
+                    -- total above is effective healing.
+                    raw = s.raw,
+                    critRaw = s.critRaw,
+                    overheal = s.overheal,
+                    unverified = s.unverified,
+                    -- SPELL_MISS_* outcomes for this spell (see Aggregator.lua's
+                    -- BumpSpellMiss) - kept beside, not inside, the spell entry.
+                    avoided = avoided,
+                    mit = s.mit,
+                    topRankTotal = s.total or 0,
+                }
+                byName[name] = e
+                table.insert(list, e)
+            else
+                if (s.total or 0) > e.topRankTotal then
+                    e.spellId = spellId
+                    e.topRankTotal = s.total or 0
+                end
+                e.hits = (e.hits or 0) + (s.hits or 0)
+                e.crits = (e.crits or 0) + (s.crits or 0)
+                e.total = (e.total or 0) + (s.total or 0)
+                e.critTotal = AddOpt(e.critTotal, s.critTotal)
+                if s.min and (not e.min or s.min < e.min) then e.min = s.min end
+                if s.max and (not e.max or s.max > e.max) then e.max = s.max end
+                e.directHits = MergeHitBucket(e.directHits, s.directHits)
+                e.tickHits = MergeHitBucket(e.tickHits, s.tickHits)
+                e.casts = AddOpt(e.casts, s.casts)
+                e.raw = AddOpt(e.raw, s.raw)
+                e.critRaw = AddOpt(e.critRaw, s.critRaw)
+                e.overheal = AddOpt(e.overheal, s.overheal)
+                e.unverified = AddOpt(e.unverified, s.unverified)
+                e.avoided = MergeMit(e.avoided, avoided)
+                e.mit = MergeMit(e.mit, s.mit)
+            end
         end
     end
 
