@@ -902,6 +902,13 @@ SlashCmdList["COMBATLEDGER"] = function(msg)
         else
             CL.Print("No current or recent encounter to report on yet.")
         end
+    elseif msg == "reset" then
+        -- No confirmation (the R button asks); a fight in progress
+        -- restarts as a fresh segment.
+        pendingReset = nil
+        CL.Aggregator.ResetData()
+        if CL.UI and CL.UI.RefreshAllInstances then CL.UI.RefreshAllInstances() end
+        CL.Print("Data reset.")
     elseif msg == "options" or msg == "opt" then
         if CL.UIOptions then CL.UIOptions.Toggle() end
     elseif msg == "testdeath" then
@@ -913,7 +920,7 @@ SlashCmdList["COMBATLEDGER"] = function(msg)
             if CL.UIDeathRecap then CL.UIDeathRecap.Show(playerGuid) end
         end
     else
-        CL.Print("/cl toggle|show|hide - meter window. /cl options - lock/minimap/appearance settings. /cl history - saved encounters. /cl report - graph + leaderboard for the current/last fight. /cl testdeath - preview the death recap without dying. /cl debug - toggle event logging. /cl status - data source, errors and live encounter. /cl flush - force-write the debug log now.")
+        CL.Print("/cl toggle|show|hide - meter window. /cl options - lock/minimap/appearance settings. /cl history - saved encounters. /cl reset - clear Current Fight and Overall now (History is kept). /cl report - graph + leaderboard for the current/last fight. /cl testdeath - preview the death recap without dying. /cl debug - toggle event logging. /cl status - data source, errors and live encounter. /cl flush - force-write the debug log now.")
     end
 end
 

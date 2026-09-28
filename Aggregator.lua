@@ -285,12 +285,21 @@ local function GetOverall()
 end
 
 -- Clears Overall and the finished fight Current Fight is still showing,
--- so the meter starts blank. A fight in progress is left alone (never
--- wiped mid-fight) and saved History isn't touched.
+-- so the meter starts blank. A fight in progress restarts as a fresh
+-- segment from now - emptied in place, so the table Threat.lua keys its
+-- ledger on stays the same (resetting the meter doesn't reset real
+-- threat). Saved History isn't touched. The automatic reset rules
+-- (Events.lua) never call this mid-fight; only a manual reset does.
 local function ResetData()
     dataVersion = dataVersion + 1
     overall = NewEncounter()
     lastFinished = nil
+    if current then
+        local fresh = NewEncounter()
+        local k, v
+        for k in pairs(current) do current[k] = nil end
+        for k, v in pairs(fresh) do current[k] = v end
+    end
 end
 
 -- Adds fields that saves from older versions may lack, so Record* can

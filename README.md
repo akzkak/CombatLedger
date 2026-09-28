@@ -53,6 +53,7 @@ Drop the `CombatLedger` folder into your `Interface/AddOns` directory, alongside
 - `/cl toggle` (or just `/cl`) — show/hide the main meter window.
 - `/cl options` — lock/minimap/appearance settings, and window management.
 - `/cl history` — the saved-encounters list.
+- `/cl reset` — clear Current Fight and Overall right away, no confirmation (History is kept). Mid-fight, the fight restarts as a fresh segment.
 - Click any bar to open its per-ability, per-target breakdown.
 - Right-click the minimap icon for everything else.
 
