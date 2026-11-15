@@ -113,6 +113,9 @@ end
 
 local tracked = {}  -- [guid] = true for player/party/raid members and their pets
 local petOwner = {} -- [petGuid] = ownerGuid
+local petsByToken = {}
+local petRosterDirty = false
+local groupCombatCheckedAt = nil
 
 -- Guarded so one bad token can't abort a rebuild halfway and leave the
 -- roster partial. ownerUnit (pets only) records the pet -> owner link.
@@ -129,15 +132,28 @@ local function AddUnit(unit, ownerUnit)
                 petOwner[guid] = ownerGuid
             end
         end
+        return guid
     end
 end
 
--- Rebuilt from scratch on roster/pet changes (see Events.lua).
+local function RefreshPet(petUnit, ownerUnit)
+    local previous = petsByToken[petUnit]
+    local guid = AddUnit(petUnit, ownerUnit)
+    petsByToken[petUnit] = guid
+    -- A new pet is tracked immediately, even during a swap. The old
+    -- GUID can be removed on the next tick along with other pet changes.
+    if previous and previous ~= guid then petRosterDirty = true end
+end
+
+-- Group changes refresh immediately. Pet removals share a deferred rebuild.
 local function RefreshRoster()
     tracked = {}
     petOwner = {}
+    petsByToken = {}
+    petRosterDirty = false
+    groupCombatCheckedAt = nil
     AddUnit("player")
-    AddUnit("pet", "player")
+    RefreshPet("pet", "player")
 
     if GetNumRaidMembers and GetNumRaidMembers() > 0 then
         local i
@@ -145,15 +161,41 @@ local function RefreshRoster()
             AddUnit("raid" .. i)
             -- Raid pet tokens are "raidNpet" (suffix), unlike party's
             -- "partypetN" (prefix).
-            AddUnit("raid" .. i .. "pet", "raid" .. i)
+            RefreshPet("raid" .. i .. "pet", "raid" .. i)
         end
     elseif GetNumPartyMembers and GetNumPartyMembers() > 0 then
         local i
         for i = 1, 4 do
             AddUnit("party" .. i)
-            AddUnit("partypet" .. i, "party" .. i)
+            RefreshPet("partypet" .. i, "party" .. i)
         end
     end
+end
+
+-- UNIT_PET supplies the owner's token. Ignore target/nameplate pets and
+-- party tokens while raiding, since the roster uses raid tokens then.
+local function HandlePetChanged(unit)
+    if type(unit) ~= "string" then return end
+    if unit == "player" then
+        RefreshPet("pet", unit)
+    else
+        local raid = GetNumRaidMembers and GetNumRaidMembers() or 0
+        if raid > 0 then
+            local _, _, index = string.find(unit, "^raid([1-9]%d*)$")
+            if not index or tonumber(index) > 40 then return end
+            RefreshPet(unit .. "pet", unit)
+        else
+            local party = GetNumPartyMembers and GetNumPartyMembers() or 0
+            local _, _, index = string.find(unit, "^party([1-4])$")
+            if not index or party == 0 then return end
+            RefreshPet("partypet" .. index, unit)
+        end
+    end
+    groupCombatCheckedAt = nil
+end
+
+local function FlushPetChanges()
+    if petRosterDirty then RefreshRoster() end
 end
 
 local function IsTracked(guid)
@@ -233,7 +275,6 @@ end
 -- because heal/dispel lazy-start (Aggregator.lua) may ask on every event
 -- and a raid scan is up to 80 unit checks.
 local GROUP_COMBAT_CACHE_SECONDS = 0.25
-local groupCombatCheckedAt = nil
 local groupCombatCached = false
 
 local function AnyGroupMemberInCombat()
@@ -268,6 +309,8 @@ CL.GuidCache = {
     Purge = Purge,
     CleanupStale = CleanupStale,
     RefreshRoster = RefreshRoster,
+    HandlePetChanged = HandlePetChanged,
+    FlushPetChanges = FlushPetChanges,
     IsTracked = IsTracked,
     GetOwner = GetOwner,
     GetSummonOwner = GetSummonOwner,

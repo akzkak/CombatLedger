@@ -33,6 +33,7 @@ local MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT = 160, 100
 local MAX_WINDOW_WIDTH, MAX_WINDOW_HEIGHT = 500, 600
 
 local REFRESH_INTERVAL = 0.2
+local LIVE_CLOCK_REFRESH_SECONDS = 1
 local IDLE_REFRESH_SECONDS = 2 -- see the refresh driver at the bottom of this file
 
 -- Threat differs from every other mode: it's a live snapshot (Threat.lua)
@@ -1695,16 +1696,12 @@ local function DriverTick()
     for id, inst in pairs(instances) do
         local window = inst.frame
         if window and window:IsShown() then
-            -- Redraw only when something could have changed: new data,
-            -- or a live fight on a Current/Overall view (the rate column
-            -- divides by a duration that keeps growing with no new
-            -- events). Threat mode redraws itself when a snapshot lands
-            -- (UI.RefreshMode). IDLE_REFRESH_SECONDS is a slow safety net
-            -- for anything that changes without going through either
-            -- (a late-resolving name, etc).
+            -- Fresh data is picked up on the next display tick. In quiet
+            -- fights, cap redraws for changing rates at once per second
+            -- from the last draw. Threat snapshots redraw via RefreshMode.
             local timeDriven = live and window.mode ~= "threat" and window.segment ~= "history"
-            if inst.drawnVersion ~= version or timeDriven
-                or not inst.drawnAt or (now - inst.drawnAt) >= IDLE_REFRESH_SECONDS then
+            local refreshAfter = timeDriven and LIVE_CLOCK_REFRESH_SECONDS or IDLE_REFRESH_SECONDS
+            if inst.drawnVersion ~= version or not inst.drawnAt or now - inst.drawnAt >= refreshAfter then
                 RefreshInstance(inst)
             end
         end

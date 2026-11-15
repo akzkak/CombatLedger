@@ -554,22 +554,23 @@ local function Dispatch()
         return
     end
 
-    if event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" or event == "UNIT_PET" then
-        -- UNIT_PET: a pet summoned/dismissed/killed changes the roster
-        -- without changing group composition.
+    if event == "UNIT_PET" then
+        CL.GuidCache.HandlePetChanged(arg1)
+        return
+    end
+
+    if event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
         CL.GuidCache.RefreshRoster()
-        if event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
-            if CL.UI and CL.UI.ReconcileGroupVisibility then
-                CL.UI.ReconcileGroupVisibility()
-            end
-            local grouped = IsGrouped()
-            if grouped and not wasGrouped then
-                RequestReset("clearOnJoinPartyMode", "you joined a group.")
-            elseif wasGrouped and not grouped then
-                RequestReset("clearOnLeavePartyMode", "you left the group.")
-            end
-            wasGrouped = grouped
+        if CL.UI and CL.UI.ReconcileGroupVisibility then
+            CL.UI.ReconcileGroupVisibility()
         end
+        local grouped = IsGrouped()
+        if grouped and not wasGrouped then
+            RequestReset("clearOnJoinPartyMode", "you joined a group.")
+        elseif wasGrouped and not grouped then
+            RequestReset("clearOnLeavePartyMode", "you left the group.")
+        end
+        wasGrouped = grouped
         return
     end
 
@@ -692,6 +693,7 @@ local idleSuppressedLogged = false
 -- Reads the OnUpdate elapsed-time global (arg1) directly; see Dispatch.
 local function Tick()
     local elapsed = arg1
+    CL.GuidCache.FlushPetChanges()
     flushAccum = flushAccum + elapsed
     if flushAccum >= 1 then
         flushAccum = 0

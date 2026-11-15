@@ -47,6 +47,7 @@ local MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT = 360, 240
 local MAX_WINDOW_WIDTH, MAX_WINDOW_HEIGHT = 700, 600
 
 local REFRESH_INTERVAL = 0.2
+local LIVE_CLOCK_REFRESH_SECONDS = 1
 local IDLE_REFRESH_SECONDS = 2 -- same redraw gating as UI_MainWindow.lua's driver
 local drawnVersion, drawnAt = nil, nil -- what the last BD.Refresh reflected
 
@@ -1190,13 +1191,10 @@ local function DriverTick()
     if accum < REFRESH_INTERVAL then return end
     accum = 0
     if not window or not window:IsShown() then return end
-    -- Same rule as the main window's driver: redraw on new data, every
-    -- tick during a live fight on a Current/Overall view (rates divide
-    -- by a still-growing duration), else only as a slow safety net.
     local now = GetTime()
     local timeDriven = CL.Aggregator.GetCurrent() ~= nil and currentSegment ~= "history"
-    if drawnVersion ~= CL.Aggregator.GetDataVersion() or timeDriven
-        or not drawnAt or (now - drawnAt) >= IDLE_REFRESH_SECONDS then
+    local refreshAfter = timeDriven and LIVE_CLOCK_REFRESH_SECONDS or IDLE_REFRESH_SECONDS
+    if drawnVersion ~= CL.Aggregator.GetDataVersion() or not drawnAt or now - drawnAt >= refreshAfter then
         BD.Refresh()
     end
 end
