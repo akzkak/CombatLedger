@@ -24,6 +24,8 @@ local ZERO_GUID = "0x0000000000000000"
 -- loses anything already shown.
 local cache = {}
 local STALE_TIMEOUT = 300
+local summonChecks = {} -- [summonGuid] = { owner, checkedAt, attempts }
+local SUMMON_RECHECK_SECONDS = 3
 
 -- Placeholders the client returns for a unit it knows exists but hasn't
 -- received the name of yet (common right after a loading screen). Never
@@ -82,6 +84,7 @@ end
 
 local function Purge()
     cache = {}
+    summonChecks = {}
 end
 
 local function CleanupStale()
@@ -96,6 +99,11 @@ local function CleanupStale()
     local i
     for i = 1, table.getn(toRemove) do
         cache[toRemove[i]] = nil
+    end
+    for guid, entry in pairs(summonChecks) do
+        if now - entry.checkedAt > STALE_TIMEOUT then
+            summonChecks[guid] = nil
+        end
     end
 end
 
@@ -158,6 +166,55 @@ local function GetOwner(guid)
     return petOwner[guid]
 end
 
+local function IsRealGuid(guid)
+    return type(guid) == "string" and guid ~= "" and guid ~= ZERO_GUID
+end
+
+local function ReadSummoner(guid)
+    local ok, owner
+    if GetUnitField then
+        ok, owner = pcall(GetUnitField, guid, "summonedBy")
+        if ok and IsRealGuid(owner) then return owner end
+        ok, owner = pcall(GetUnitField, guid, "createdBy")
+        if ok and IsRealGuid(owner) then return owner end
+    end
+    if GetUnitGUID then
+        ok, owner = pcall(GetUnitGUID, guid .. "owner")
+        if ok and IsRealGuid(owner) then return owner end
+    end
+end
+
+local function GetSummonOwner(guid)
+    local entry = summonChecks[guid]
+    local owner = entry and entry.owner
+    if owner and tracked[owner] and not petOwner[owner] and not tracked[guid] then return owner end
+end
+
+-- Fire Nova can despawn between SPELL_GO and the first damage packet.
+-- Keep the link across pet/roster updates and check current membership
+-- when using it. A second packet can retry a lookup made before the
+-- client knew the summon, then back off for ordinary enemy units.
+local function LearnSummonOwner(guid)
+    if not IsRealGuid(guid) or tracked[guid] or not (GetUnitField or GetUnitGUID) then return end
+    local now = GetTime()
+    local entry = summonChecks[guid]
+    if entry then
+        if entry.owner then
+            entry.checkedAt = now
+            return GetSummonOwner(guid)
+        end
+        if entry.attempts >= 2 and now - entry.checkedAt < SUMMON_RECHECK_SECONDS then return end
+    else
+        entry = { attempts = 0 }
+        summonChecks[guid] = entry
+    end
+    entry.attempts = entry.attempts + 1
+    entry.checkedAt = now
+    local owner = ReadSummoner(guid)
+    if owner ~= guid then entry.owner = owner end
+    return GetSummonOwner(guid)
+end
+
 --------------------------------------------------------------------------
 -- Combat state
 --------------------------------------------------------------------------
@@ -213,4 +270,6 @@ CL.GuidCache = {
     RefreshRoster = RefreshRoster,
     IsTracked = IsTracked,
     GetOwner = GetOwner,
+    GetSummonOwner = GetSummonOwner,
+    LearnSummonOwner = LearnSummonOwner,
 }

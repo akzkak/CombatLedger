@@ -562,9 +562,8 @@ end
 -- Records one hit into a units table: Damage Done for a roster caster,
 -- Damage Taken for a roster target. Mobs never get a unit of their own.
 -- Either guid may be nil (environment damage has no caster).
-local function RecordDamageInto(units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
+local function RecordDamageInto(units, casterGuid, attributed, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
     if casterGuid then
-        local attributed = AttributedGuid(casterGuid)
         if IsTrackedGuid(attributed) then
             local u = EnsureUnit(units, attributed)
             u.damageDone.total = u.damageDone.total + amount
@@ -639,24 +638,33 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
         StartEncounter()
     end
 
+    -- A tokenless summon has no meter row of its own, regardless of the
+    -- merge-pets setting. Only its outgoing damage belongs to the owner.
+    local summonOwner = CL.GuidCache.GetSummonOwner(casterGuid)
+    local attributed = summonOwner or AttributedGuid(casterGuid)
+
     -- Pull attribution: the caster of the first hit involving a boss
     -- "pulled" it. Set once; trash-only encounters never set it.
-    local bossName = not current.pullBy and casterGuid and BossNameCached(EnemyGuidFor(casterGuid, targetGuid))
+    local bossName = not current.pullBy and casterGuid and BossNameCached(EnemyGuidFor(summonOwner or casterGuid, targetGuid))
     if bossName then
-        local info = CL.GuidCache and CL.GuidCache.Resolve(casterGuid)
-        current.pullBy = { name = (info and info.name) or casterGuid, label = spellName or "Auto Attack" }
+        local pullGuid = summonOwner or casterGuid
+        local info = CL.GuidCache.Resolve(pullGuid)
+        current.pullBy = { name = (info and info.name) or pullGuid, label = spellName or "Auto Attack" }
         MarkBoss(bossName)
         if CL.GetSetting("announcePulls") ~= false then
             CL.Print("Pull: " .. current.pullBy.name .. " (" .. current.pullBy.label .. ")")
         end
     end
 
-    RecordDamageInto(current.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
-    RecordDamageInto(overall.units, casterGuid, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
-    -- Raw (un-merged) caster: threat belongs to the pet itself.
-    if CL.Threat then CL.Threat.NoteDamage(current, casterGuid, targetGuid, spellId, spellName, school, amount) end
+    RecordDamageInto(current.units, casterGuid, attributed, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
+    RecordDamageInto(overall.units, casterGuid, attributed, targetGuid, spellId, spellName, school, amount, isCrit, isOffhand, isPeriodic, mit)
+    -- Threat stays with the original caster for regular pets. A tokenless
+    -- summon's damage does not add to the owner's threat estimate.
+    if CL.Threat and not summonOwner then
+        CL.Threat.NoteDamage(current, casterGuid, targetGuid, spellId, spellName, school, amount)
+    end
 
-    if casterGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
+    if IsTrackedGuid(attributed) then
         RecordSeriesPoint(current, "damage", amount)
     end
     if targetGuid and IsTrackedGuid(AttributedGuid(targetGuid)) then
@@ -665,7 +673,7 @@ local function RecordDamage(casterGuid, targetGuid, spellId, spellName, school, 
 
     -- Damage and max health per enemy, only so History.lua can label a
     -- saved encounter after the toughest mob in it.
-    if casterGuid and targetGuid and IsTrackedGuid(AttributedGuid(casterGuid)) then
+    if targetGuid and IsTrackedGuid(attributed) then
         local targetAttributed = AttributedGuid(targetGuid)
         if not IsTrackedGuid(targetAttributed) then
             current.mobTally[targetAttributed] = (current.mobTally[targetAttributed] or 0) + amount

@@ -55,6 +55,15 @@ local function IsRelevant(guidA, guidB)
     return CL.GuidCache.IsTracked(guidA) or CL.GuidCache.IsTracked(guidB)
 end
 
+-- Tokenless summons can contribute damage without becoming roster units.
+-- Retry ownership on the hit for summons whose fields arrived late or
+-- whose first event is an auto-attack.
+local function IsDamageRelevant(casterGuid, targetGuid, amount)
+    if CL.GuidCache.GetSummonOwner(targetGuid) then return false end
+    if amount > 0 and CL.GuidCache.LearnSummonOwner(casterGuid) then return true end
+    return IsRelevant(casterGuid, targetGuid)
+end
+
 -- Time of the last relevant combat event. Drives the idle-timeout
 -- fallback and trims trailing idle time off a finished encounter's
 -- duration (Aggregator.EndEncounter). Only relevant events touch it -
@@ -91,7 +100,7 @@ end
 local function HandleAutoAttack(isSelf, attackerGuid, targetGuid, totalDamage, hitInfo, victimState, componentCount, blocked, absorbed, resisted)
     totalDamage = tonumber(totalDamage) or 0
     hitInfo = tonumber(hitInfo)
-    local relevant = IsRelevant(attackerGuid, targetGuid)
+    local relevant = IsDamageRelevant(attackerGuid, targetGuid, totalDamage)
     if relevant then TouchActivity() end
     if CL.debug then
         CL.LogLine(string.format(
@@ -155,7 +164,7 @@ local function HandleSpellDamage(isSelf, targetGuid, casterGuid, spellId, amount
     spellId = tonumber(spellId)
     hitInfo = tonumber(hitInfo)
     local name = SpellName(spellId)
-    local relevant = IsRelevant(casterGuid, targetGuid)
+    local relevant = IsDamageRelevant(casterGuid, targetGuid, amount)
     if relevant then TouchActivity() end
     if CL.debug then
         CL.LogLine(string.format(
@@ -297,7 +306,7 @@ local REFLECT_SPELL_ID = -1
 local function HandleDamageShield(isSelf, casterGuid, targetGuid, amount, school)
     amount = tonumber(amount) or 0
     school = tonumber(school)
-    local relevant = IsRelevant(casterGuid, targetGuid)
+    local relevant = IsDamageRelevant(casterGuid, targetGuid, amount)
     if relevant then TouchActivity() end
     if CL.debug then
         CL.LogLine(string.format(
@@ -316,7 +325,7 @@ end
 local function HandleSpellMiss(isSelf, casterGuid, targetGuid, spellId, missInfo)
     spellId = tonumber(spellId)
     missInfo = tonumber(missInfo)
-    local relevant = IsRelevant(casterGuid, targetGuid)
+    local relevant = not CL.GuidCache.GetSummonOwner(targetGuid) and IsRelevant(casterGuid, targetGuid)
     if relevant then TouchActivity() end
     if CL.debug then
         CL.LogLine(string.format("%s[SPELL_MISS_%s] caster=%s tgt=%s spell=%s(%s) missInfo=%s",
@@ -507,6 +516,10 @@ end
 -- Reads the 1.12 event globals (event, arg1..arg9) directly so it can be
 -- pcall'd without building an argument table per event.
 local function Dispatch()
+    if event == "SPELL_GO_SELF" or event == "SPELL_GO_OTHER" then
+        CL.GuidCache.LearnSummonOwner(arg3)
+        return
+    end
     if event == "PLAYER_ENTERING_WORLD" then
         EnableCVars()
         CL.GuidCache.Purge()
@@ -779,6 +792,8 @@ f:RegisterEvent("AUTO_ATTACK_SELF")
 f:RegisterEvent("AUTO_ATTACK_OTHER")
 f:RegisterEvent("SPELL_DAMAGE_EVENT_SELF")
 f:RegisterEvent("SPELL_DAMAGE_EVENT_OTHER")
+f:RegisterEvent("SPELL_GO_SELF")
+f:RegisterEvent("SPELL_GO_OTHER")
 f:RegisterEvent("SPELL_HEAL_BY_SELF")
 f:RegisterEvent("SPELL_HEAL_BY_OTHER")
 f:RegisterEvent("SPELL_MISS_SELF")
