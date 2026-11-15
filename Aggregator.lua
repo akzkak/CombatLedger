@@ -797,6 +797,7 @@ local function RecordAvoidance(casterGuid, targetGuid, victimState, isOffhand, m
         StartEncounter()
     end
     local key = fullAbsorb and "absorb" or VICTIMSTATE_KEY[victimState] or "other"
+    if key == "evade" and CL.Threat and IsTrackedGuid(casterGuid) then CL.Threat.ForgetEnemy(targetGuid) end
     RecordAvoidanceInto(current.units, casterGuid, targetGuid, key, isOffhand, mit)
     RecordAvoidanceInto(overall.units, casterGuid, targetGuid, key, isOffhand, mit)
 end
@@ -886,6 +887,7 @@ local function RecordSpellMiss(casterGuid, targetGuid, spellId, missInfo)
         StartEncounter()
     end
     local key = SPELL_MISS_KEY[missInfo] or "other"
+    if key == "evade" and CL.Threat and IsTrackedGuid(casterGuid) then CL.Threat.ForgetEnemy(targetGuid) end
     RecordSpellMissInto(current.units, casterGuid, targetGuid, spellId, key)
     RecordSpellMissInto(overall.units, casterGuid, targetGuid, spellId, key)
 end

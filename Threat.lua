@@ -8,9 +8,8 @@
 
     Fallback path: EstimateThreat() below reads a local threat ledger fed
     per event by Aggregator (NoteDamage/NoteHealing) and SPELL_GO - see
-    the "Local threat estimation" section. Runs whenever a poll happens
-    but no real reply has landed recently, so the real API always wins
-    when available.
+    the "Local threat estimation" section. Available solo or grouped
+    whenever there is no fresh server reply for the target.
 
     Threat is a live snapshot for the current target only - no Overall
     or History. UI_MainWindow.lua reads CL.Threat.GetSnapshot() directly.
@@ -28,13 +27,18 @@ local REQUEST_LIMIT = 10
 -- Seconds without a server reply before the local estimate takes over;
 -- long enough that a slightly late reply still wins.
 local ESTIMATE_GRACE = 2
+local UNANSWERED_LIMIT = 8
+local BACKOFF_INTERVAL = 15
+local MAX_REPLY_ROWS = 40
+local MAX_REPLY_LENGTH = 4096
 
 -- The displayed snapshot: [guid] = { name, threat, perc, melee, tank },
 -- from a server reply or the estimate. Declared before the estimator,
 -- which writes it (locals must be declared above their first use).
 local current = {}
 local tankGuid = nil
-local lastUpdate = 0
+local serverSnapshotAt = nil
+local lastServerReplyAt = 0
 
 -- ============================================================
 -- Local threat estimation (fallback when no real server reply arrives -
@@ -256,6 +260,8 @@ end
 --------------------------------------------------------------------------
 
 local ledger = {}           -- [enemyGuid][actorGuid] = threat
+local enemyActivity = {}    -- last direct combat event, excluding shared threat
+local ENEMY_IDLE_SECONDS = 30
 local meleeActors = {}      -- [enemyGuid][actorGuid] = true once they've auto-attacked it
 local ledgerEncounter = nil -- the Aggregator encounter the ledger belongs to
 
@@ -263,9 +269,32 @@ local ledgerEncounter = nil -- the Aggregator encounter the ledger belongs to
 local function SyncEncounter(enc)
     if enc ~= ledgerEncounter then
         ledger = {}
+        enemyActivity = {}
         meleeActors = {}
         ledgerEncounter = enc
     end
+end
+
+local function ForgetEnemy(guid)
+    if not ValidGuid(guid) then return end
+    ledger[guid] = nil
+    enemyActivity[guid] = nil
+    meleeActors[guid] = nil
+end
+
+local function PruneEnemies(now)
+    local guid, seen
+    for guid, seen in pairs(enemyActivity) do
+        if now - seen >= ENEMY_IDLE_SECONDS then ForgetEnemy(guid) end
+    end
+end
+
+local function MarkEnemyActivity(guid)
+    local now = GetTime()
+    if enemyActivity[guid] and now - enemyActivity[guid] >= ENEMY_IDLE_SECONDS then
+        ForgetEnemy(guid)
+    end
+    enemyActivity[guid] = now
 end
 
 local function AddThreat(enemyGuid, actorGuid, amount)
@@ -281,8 +310,12 @@ end
 -- Called by Aggregator.RecordDamage for every recorded hit (enc = the
 -- live encounter). spellId nil = auto-attack.
 local function NoteDamage(enc, casterGuid, targetGuid, spellId, spellName, school, amount)
-    if not IsTrackedGuid(casterGuid) or not ValidGuid(targetGuid) or IsTrackedGuid(targetGuid) then return end
     SyncEncounter(enc)
+    if casterGuid and ledger[casterGuid] and IsTrackedGuid(targetGuid) then
+        MarkEnemyActivity(casterGuid)
+    end
+    if not IsTrackedGuid(casterGuid) or not ValidGuid(targetGuid) or IsTrackedGuid(targetGuid) then return end
+    MarkEnemyActivity(targetGuid)
     AddThreat(targetGuid, casterGuid, amount * SpellDamageThreatMult(spellName, spellId) * ActorMod(casterGuid, school))
     if not spellId then
         local byActor = meleeActors[targetGuid]
@@ -300,6 +333,7 @@ end
 local function NoteHealing(enc, casterGuid, effective)
     if not IsTrackedGuid(casterGuid) or not effective or effective <= 0 then return end
     SyncEncounter(enc)
+    PruneEnemies(GetTime())
     local count = 0
     local enemyGuid
     for enemyGuid in pairs(ledger) do count = count + 1 end
@@ -312,10 +346,15 @@ end
 -- needs no changes to consume either source. The tank is whoever the
 -- enemy is actually targeting (the aggro holder the 110%/130% rule is
 -- measured against), falling back to the top of the ledger.
-local function EstimateThreat(targetGuid)
+local function EstimateThreat(targetGuid, now)
     if not ValidGuid(targetGuid) then return false end
     local enc = CL.Aggregator.GetCurrent()
     if not enc or enc ~= ledgerEncounter then return false end
+    local seen = enemyActivity[targetGuid]
+    if not seen or now - seen >= ENEMY_IDLE_SECONDS then
+        ForgetEnemy(targetGuid)
+        return false
+    end
     local byActor = ledger[targetGuid]
     if not byActor then return false end
 
@@ -352,8 +391,7 @@ local function EstimateThreat(targetGuid)
     tankGuid = newTank
 
     if CL.debug then
-        CL.LogLine("[Threat] estimated target=" .. tostring(targetGuid) .. " " .. CL.TableCount(newCurrent) .. " actors (no real reply for " ..
-            string.format("%.1f", GetTime() - lastUpdate) .. "s)")
+        CL.LogLine("[Threat] estimated target=" .. tostring(targetGuid) .. " " .. CL.TableCount(newCurrent) .. " actors")
     end
 
     if CL.UI and CL.UI.RefreshMode then CL.UI.RefreshMode("threat") end
@@ -364,41 +402,70 @@ end
 -- this maps them back to GUIDs.
 local nameToGuid = {}
 
--- Set when the target changes, cleared when data for it arrives. Until
--- then the previous target's bars stay up (a swap in place instead of a
--- flash to empty); after STALE_TARGET_TIMEOUT without data they clear.
-local pendingTargetSince = nil
-local STALE_TARGET_TIMEOUT = 2
+local targetGuid, requestedTarget, requestedAt
+local requestChannel, nextQueryAt
+local unansweredQueries = 0
 
-local function AddRosterName(unit)
+local function ClearSnapshot()
+    serverSnapshotAt = nil
+    if not next(current) then return end
+    current = {}
+    tankGuid = nil
+    if CL.UI and CL.UI.RefreshMode then CL.UI.RefreshMode("threat") end
+end
+
+local function InvalidateRequest()
+    requestedTarget, requestedAt, nextQueryAt = nil, nil, nil
+    ClearSnapshot()
+end
+
+local function AddRosterName(roster, unit)
     local ok, exists, guid = pcall(UnitExists, unit)
     if ok and exists and guid then
         local name = UnitName(unit)
-        if name then nameToGuid[name] = guid end
+        if name then roster[name] = guid end
     end
+end
+
+local function SameRoster(a, b)
+    local name, guid
+    for name, guid in pairs(a) do
+        if b[name] ~= guid then return false end
+    end
+    for name in pairs(b) do
+        if not a[name] then return false end
+    end
+    return true
 end
 
 local function RefreshRosterNames()
-    nameToGuid = {}
-    AddRosterName("player")
-    if GetNumRaidMembers and GetNumRaidMembers() > 0 then
-        local i
-        for i = 1, 40 do
-            AddRosterName("raid" .. i)
-        end
-    elseif GetNumPartyMembers and GetNumPartyMembers() > 0 then
-        local i
-        for i = 1, 4 do
-            AddRosterName("party" .. i)
-        end
+    local roster = {}
+    AddRosterName(roster, "player")
+    local raid = GetNumRaidMembers and GetNumRaidMembers() or 0
+    local party = GetNumPartyMembers and GetNumPartyMembers() or 0
+    local channel, prefix, count
+    if raid > 0 then
+        channel, prefix, count = "RAID", "raid", raid
+    elseif party > 0 then
+        channel, prefix, count = "PARTY", "party", party
+    end
+    local i
+    for i = 1, count or 0 do AddRosterName(roster, prefix .. i) end
+
+    local changed = requestChannel ~= channel or not SameRoster(nameToGuid, roster)
+    requestChannel, nameToGuid = channel, roster
+    if changed then
+        unansweredQueries = 0
+        InvalidateRequest()
     end
 end
 
--- RAID in a raid, otherwise PARTY - even solo, since the server reads
--- the message by its prefix, not by channel membership.
-local function GroupChannel()
-    if GetNumRaidMembers and GetNumRaidMembers() > 0 then return "RAID" end
-    return "PARTY"
+local function GetVisibleTarget()
+    if not (CL.UI and CL.UI.IsModeVisible and CL.UI.IsModeVisible("threat")) then return end
+    local ok, exists, guid = pcall(UnitExists, "target")
+    if not (ok and exists and ValidGuid(guid) and not IsTrackedGuid(guid)) then return end
+    if UnitIsDeadOrGhost and UnitIsDeadOrGhost("target") then return end
+    return guid
 end
 
 -- Plain-text split on a delimiter.
@@ -415,61 +482,94 @@ local function SplitString(str, delimiter)
     return result
 end
 
--- body: "name:isTank:threat:perc:isMelee;name2:...;..."
-local function HandleThreatPacket(body)
-    if CL.debug then CL.LogLine("[Threat] packet body: " .. tostring(body)) end
+local function IsFinite(value)
+    return value and value - value == 0
+end
 
-    local newCurrent = {}
-    local newTank = nil
+-- Validate into a fresh table before replacing the displayed snapshot.
+local function ParseThreatPacket(body)
+    local rows, tank, count = {}, nil, 0
+    -- TWThreat may append tank-mode data after the per-target reply.
+    local trailer = string.find(body, "#TMTv1=", 1, true)
+    if trailer then body = string.sub(body, 1, trailer - 1) end
 
     local entries = SplitString(body, ";")
     local i
     for i = 1, table.getn(entries) do
         if entries[i] ~= "" then
+            count = count + 1
+            if count > MAX_REPLY_ROWS then return end
             local parts = SplitString(entries[i], ":")
             local name, tankFlag, threatStr, percStr, meleeFlag = parts[1], parts[2], parts[3], parts[4], parts[5]
-            if name and tankFlag and threatStr and percStr then
-                local guid = nameToGuid[name] or ("THREATNAME:" .. name)
-                local isTank = (tankFlag == "1")
-                -- Rounded: the server sends float noise (71.199997).
-                local percNum = tonumber(percStr) or 0
-                newCurrent[guid] = {
-                    name = name,
-                    threat = tonumber(threatStr) or 0,
-                    perc = math.floor(percNum + 0.5),
-                    melee = (meleeFlag == "1"),
-                    tank = isTank,
-                }
-                if isTank then newTank = guid end
-                if CL.debug then
-                    CL.LogLine("[Threat]   parsed " .. name .. " guid=" .. tostring(guid) ..
-                        " threat=" .. tostring(threatStr) .. " perc=" .. tostring(percStr) .. " tank=" .. tostring(isTank))
-                end
-            elseif CL.debug then
-                CL.LogLine("[Threat]   unparseable entry: " .. tostring(entries[i]))
-            end
+            local threat, percent = tonumber(threatStr), tonumber(percStr)
+            if name == "" or string.len(name) > 48 or string.find(name, "[%c|]") then return end
+            if not IsFinite(threat) or not IsFinite(percent) then return end
+            if tankFlag ~= "0" and tankFlag ~= "1" then return end
+            if meleeFlag and meleeFlag ~= "" and meleeFlag ~= "0" and meleeFlag ~= "1" then return end
+            local guid = nameToGuid[name] or ("THREATNAME:" .. name)
+            rows[guid] = {
+                name = name,
+                threat = threat,
+                perc = math.floor(percent + 0.5),
+                melee = meleeFlag == "1",
+                tank = tankFlag == "1",
+            }
+            if tankFlag == "1" then tank = guid end
         end
     end
+    return rows, tank
+end
 
-    if CL.debug then CL.LogLine("[Threat] " .. table.getn(entries) .. " entries -> " .. CL.TableCount(newCurrent) .. " players resolved") end
+local reportedRejectedReply = false
+local function RejectReply(reason)
+    if not reportedRejectedReply then
+        CL.Print("Ignored a threat reply (" .. reason .. ").")
+        reportedRejectedReply = true
+    end
+    if CL.debug then CL.LogLine("[Threat] ignored reply: " .. reason) end
+end
 
-    current = newCurrent
-    tankGuid = newTank
-    lastUpdate = GetTime()
-    pendingTargetSince = nil
-
+local function HandleThreatReply(message, channel, sender)
+    if not requestChannel then return end
+    local marker = type(message) == "string" and string.find(message, REPLY_PREFIX, 1, true)
+    if not marker then return end
+    if channel and channel ~= "" and channel ~= requestChannel then
+        RejectReply("unexpected channel")
+        return
+    end
+    -- Server replies can have no sender or be attributed to the local
+    -- player. Other players' addon messages cannot be server replies.
+    if sender and sender ~= "" and sender ~= UnitName("player") then
+        RejectReply("unexpected sender")
+        return
+    end
+    local now = GetTime()
+    if not requestedTarget or now - requestedAt > ESTIMATE_GRACE or GetVisibleTarget() ~= requestedTarget
+        or not UnitAffectingCombat("target") then return end
+    if string.len(message) > MAX_REPLY_LENGTH then
+        RejectReply("oversized payload")
+        return
+    end
+    local rows, tank = ParseThreatPacket(string.sub(message, marker + string.len(REPLY_PREFIX)))
+    if not rows then
+        RejectReply("malformed payload")
+        return
+    end
+    if unansweredQueries >= UNANSWERED_LIMIT then
+        nextQueryAt = now + POLL_INTERVAL
+    end
+    unansweredQueries = 0
+    current, tankGuid, serverSnapshotAt, lastServerReplyAt = rows, tank, now, now
     if CL.UI and CL.UI.RefreshMode then CL.UI.RefreshMode("threat") end
 end
 
-local function RequestThreat()
-    local channel = GroupChannel()
-    if not channel then return end
-    local requestBody = "limit=" .. REQUEST_LIMIT
-    local ok, err = pcall(SendAddonMessage, REQUEST_PREFIX, requestBody, channel)
-    if CL.debug then
-        CL.LogLine("[Threat] request sent prefix=" .. REQUEST_PREFIX ..
-            " body=" .. requestBody .. " channel=" .. channel .. " ok=" .. tostring(ok) ..
-            (ok and "" or (" err=" .. tostring(err))))
+local function RequestThreat(guid, now)
+    requestedTarget, requestedAt = guid, now
+    unansweredQueries = unansweredQueries + 1
+    nextQueryAt = now + (unansweredQueries >= UNANSWERED_LIMIT and BACKOFF_INTERVAL or POLL_INTERVAL)
+    local ok, err = pcall(SendAddonMessage, REQUEST_PREFIX, "limit=" .. REQUEST_LIMIT, requestChannel)
+    if not ok and CL.debug then
+        CL.LogLine("[Threat] request failed: " .. tostring(err))
     end
 end
 
@@ -506,10 +606,13 @@ local function HandleThreatSpellGo(spellId, casterGuid, targetGuid, numTargetsHi
         if ok and exists then targetGuid = liveTargetGuid end
     end
 
-    if targetThreat ~= 0 and ValidGuid(targetGuid) and (tonumber(numTargetsHit) or 1) > 0 then
+    if targetThreat ~= 0 and ValidGuid(targetGuid) and not IsTrackedGuid(targetGuid)
+        and (tonumber(numTargetsHit) or 1) > 0 then
+        MarkEnemyActivity(targetGuid)
         AddThreat(targetGuid, casterGuid, targetThreat * mod)
     end
     if allThreat ~= 0 then
+        PruneEnemies(GetTime())
         local enemyGuid
         for enemyGuid in pairs(ledger) do
             AddThreat(enemyGuid, casterGuid, allThreat * mod)
@@ -522,6 +625,7 @@ f:RegisterEvent("CHAT_MSG_ADDON")
 f:RegisterEvent("PARTY_MEMBERS_CHANGED")
 f:RegisterEvent("RAID_ROSTER_UPDATE")
 f:RegisterEvent("PLAYER_ENTERING_WORLD")
+f:RegisterEvent("PLAYER_TARGET_CHANGED")
 f:RegisterEvent("SPELL_GO_SELF")
 f:RegisterEvent("SPELL_GO_OTHER")
 f:RegisterEvent("UNIT_DIED")
@@ -529,20 +633,19 @@ local function OnThreatEvent()
     if event == "PLAYER_ENTERING_WORLD" then
         buffState = {}
         stanceByGuid = {}
+        targetGuid = nil
+        unansweredQueries = 0
+        InvalidateRequest()
         RefreshRosterNames()
         return
     end
+    if event == "PLAYER_TARGET_CHANGED" then
+        targetGuid = nil
+        InvalidateRequest()
+        return
+    end
     if event == "CHAT_MSG_ADDON" then
-        -- arg1 = prefix, arg2 = message, arg3 = channel, arg4 = sender.
-        -- The "TWTv4=" marker is inside the message body, not the prefix.
-        if CL.debug and arg1 and (string.find(arg1, "TWT", 1, true) or (arg2 and string.find(arg2, "TWT", 1, true))) then
-            CL.LogLine("[Threat] CHAT_MSG_ADDON prefix=" .. tostring(arg1) .. " from=" .. tostring(arg4) .. " msg=" .. tostring(arg2))
-        end
-        if arg2 and string.find(arg2, REPLY_PREFIX, 1, true) then
-            local prefixPos = string.find(arg2, REPLY_PREFIX, 1, true)
-            local body = string.sub(arg2, prefixPos + string.len(REPLY_PREFIX))
-            HandleThreatPacket(body)
-        end
+        HandleThreatReply(arg2, arg3, arg4)
         return
     end
     if event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
@@ -553,10 +656,8 @@ local function OnThreatEvent()
     -- so regen changes need no handling here. A dead enemy stops taking
     -- a share of healing threat.
     if event == "UNIT_DIED" then
-        if arg1 then
-            ledger[arg1] = nil
-            meleeActors[arg1] = nil
-        end
+        ForgetEnemy(arg1)
+        if arg1 and arg1 == targetGuid then InvalidateRequest() end
         return
     end
     if event == "SPELL_GO_SELF" or event == "SPELL_GO_OTHER" then
@@ -573,74 +674,29 @@ end)
 RefreshRosterNames()
 
 local accum = 0
-local wasPolling = false
-local debugAccum = 0
-local lastTargetGuid = nil
 local function OnThreatUpdate()
     accum = accum + arg1
     if accum < POLL_INTERVAL then return end
     accum = 0
 
-    -- Only poll while some window shows Threat mode.
-    local hasUI = CL.UI and CL.UI.IsModeVisible
-    local wantsThreat = hasUI and CL.UI.IsModeVisible("threat")
-    local channel = wantsThreat and GroupChannel()
-    local hasTargetOk, hasTarget, targetGuid, inCombat
-    local polling = false
-    if channel then
-        hasTargetOk, hasTarget, targetGuid = pcall(UnitExists, "target")
-        inCombat = hasTargetOk and hasTarget and UnitAffectingCombat("target")
-        polling = inCombat
+    local guid = GetVisibleTarget()
+    if guid ~= targetGuid then
+        targetGuid = guid
+        InvalidateRequest()
+    end
+    if not guid then return end
+
+    local now = GetTime()
+    local canQuery = requestChannel and SendAddonMessage and UnitAffectingCombat("target")
+    if canQuery and (not nextQueryAt or now >= nextQueryAt) then
+        RequestThreat(guid, now)
+    elseif not canQuery then
+        requestedTarget, requestedAt, nextQueryAt = nil, nil, nil
     end
 
-    -- Target changed: keep the old bars until the new target's data
-    -- arrives (see pendingTargetSince).
-    if targetGuid ~= lastTargetGuid then
-        if CL.debug then
-            CL.LogLine("[Threat] target changed: " .. tostring(lastTargetGuid) .. " -> " .. tostring(targetGuid))
-        end
-        lastTargetGuid = targetGuid
-        pendingTargetSince = GetTime()
-    end
-
-    -- No data for the new target in time: clear.
-    if pendingTargetSince and (GetTime() - pendingTargetSince) > STALE_TARGET_TIMEOUT then
-        pendingTargetSince = nil
-        if CL.debug then CL.LogLine("[Threat] pending target never replied - clearing") end
-        current = {}
-        tankGuid = nil
-        if CL.UI and CL.UI.RefreshMode then CL.UI.RefreshMode("threat") end
-    end
-
-    if CL.debug then
-        debugAccum = debugAccum + POLL_INTERVAL
-        if polling ~= wasPolling or debugAccum >= 3 then
-            debugAccum = 0
-            CL.LogLine("[Threat] state: polling=" .. tostring(polling) ..
-                " hasUI=" .. tostring(hasUI) .. " wantsThreat=" .. tostring(wantsThreat) ..
-                " channel=" .. tostring(channel) .. " hasTargetOk=" .. tostring(hasTargetOk) ..
-                " hasTarget=" .. tostring(hasTarget) .. " inCombat=" .. tostring(inCombat))
-        end
-    end
-
-    if polling then
-        RequestThreat()
-        -- The estimate only fills in while server replies are missing;
-        -- a reply always overwrites it.
-        if (GetTime() - lastUpdate) > ESTIMATE_GRACE then
-            if EstimateThreat(targetGuid) then
-                -- An estimate for the new target counts as its data.
-                pendingTargetSince = nil
-            end
-        end
-    elseif wasPolling then
-        -- Stopped polling (no target or out of combat): clear.
-        pendingTargetSince = nil
-        current = {}
-        tankGuid = nil
-        if CL.UI and CL.UI.RefreshMode then CL.UI.RefreshMode("threat") end
-    end
-    wasPolling = polling
+    if canQuery and serverSnapshotAt and now - serverSnapshotAt <= ESTIMATE_GRACE then return end
+    serverSnapshotAt = nil
+    if not EstimateThreat(guid, now) then ClearSnapshot() end
 end
 f:SetScript("OnUpdate", function()
     local ok, err = pcall(OnThreatUpdate)
@@ -694,9 +750,10 @@ CL.Threat = {
     GetSnapshot = function() return current end,
     GetTestSnapshot = GetTestSnapshot,
     GetTankGuid = function() return tankGuid end,
-    IsAvailable = function() return GroupChannel() ~= nil end,
-    GetLastUpdate = function() return lastUpdate end,
+    IsAvailable = function() return requestChannel ~= nil or GetVisibleTarget() ~= nil end,
+    GetLastUpdate = function() return lastServerReplyAt end,
     GetRosterNames = GetRosterNames,
     NoteDamage = NoteDamage,
     NoteHealing = NoteHealing,
+    ForgetEnemy = ForgetEnemy,
 }
