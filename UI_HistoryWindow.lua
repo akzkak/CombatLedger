@@ -8,6 +8,7 @@
 ]]
 
 local CL = CombatLedger
+local tooltipFrame = CL.Tooltip
 local HW = {}
 CL.UIHistory = HW
 
@@ -77,11 +78,11 @@ local function CreateRow(parent, index)
         end
     end)
     deleteBtn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(deleteBtn, "ANCHOR_LEFT")
-        GameTooltip:SetText("Delete")
-        GameTooltip:Show()
+        tooltipFrame:SetOwner(deleteBtn, "ANCHOR_LEFT")
+        tooltipFrame:SetText("Delete")
+        tooltipFrame:Show()
     end)
-    deleteBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    deleteBtn:SetScript("OnLeave", function() tooltipFrame:Hide() end)
     row.deleteBtn = deleteBtn
 
     local reportBtn = CreateFrame("Button", nil, row)
@@ -109,11 +110,11 @@ local function CreateRow(parent, index)
         end
     end)
     reportBtn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(reportBtn, "ANCHOR_LEFT")
-        GameTooltip:SetText("Encounter Report")
-        GameTooltip:Show()
+        tooltipFrame:SetOwner(reportBtn, "ANCHOR_LEFT")
+        tooltipFrame:SetText("Encounter Report")
+        tooltipFrame:Show()
     end)
-    reportBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    reportBtn:SetScript("OnLeave", function() tooltipFrame:Hide() end)
     row.reportBtn = reportBtn
 
     row:SetScript("OnClick", function()
@@ -238,11 +239,11 @@ local function CreateWindow()
     grip:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8" })
     grip:SetBackdropColor(themeR, themeG, themeB, 0.4)
     grip:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(this, "ANCHOR_LEFT")
-        GameTooltip:SetText("Drag to resize")
-        GameTooltip:Show()
+        tooltipFrame:SetOwner(this, "ANCHOR_LEFT")
+        tooltipFrame:SetText("Drag to resize")
+        tooltipFrame:Show()
     end)
-    grip:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    grip:SetScript("OnLeave", function() tooltipFrame:Hide() end)
     grip:SetScript("OnMouseDown", function()
         this.sizing = true
         this.startX, this.startY = GetCursorPosition()

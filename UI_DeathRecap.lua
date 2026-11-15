@@ -8,6 +8,7 @@
 ]]
 
 local CL = CombatLedger
+local tooltipFrame = CL.Tooltip
 local RC = {}
 CL.UIDeathRecap = RC
 
@@ -160,11 +161,11 @@ local function CreateWindow()
     grip:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8" })
     grip:SetBackdropColor(0.85, 0.2, 0.2, 0.4)
     grip:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(this, "ANCHOR_LEFT")
-        GameTooltip:SetText("Drag to resize")
-        GameTooltip:Show()
+        tooltipFrame:SetOwner(this, "ANCHOR_LEFT")
+        tooltipFrame:SetText("Drag to resize")
+        tooltipFrame:Show()
     end)
-    grip:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    grip:SetScript("OnLeave", function() tooltipFrame:Hide() end)
     grip:SetScript("OnMouseDown", function()
         this.sizing = true
         this.startX, this.startY = GetCursorPosition()

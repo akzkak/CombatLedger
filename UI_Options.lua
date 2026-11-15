@@ -12,6 +12,7 @@
 ]]
 
 local CL = CombatLedger
+local tooltipFrame = CL.Tooltip
 local OPT = {}
 CL.UIOptions = OPT
 
@@ -81,11 +82,11 @@ local function CreateColorSwatch(parent, anchorCB, settingKey, tooltipText)
         ShowUIPanel(ColorPickerFrame)
     end)
     swatch:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(this, "ANCHOR_LEFT")
-        GameTooltip:SetText(tooltipText)
-        GameTooltip:Show()
+        tooltipFrame:SetOwner(this, "ANCHOR_LEFT")
+        tooltipFrame:SetText(tooltipText)
+        tooltipFrame:Show()
     end)
-    swatch:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    swatch:SetScript("OnLeave", function() tooltipFrame:Hide() end)
     return swatch
 end
 
@@ -820,11 +821,11 @@ local function CreateWindow()
             label:SetPoint("LEFT", cb, "RIGHT", 2, 0)
             label:SetText(labelText)
             cb:SetScript("OnEnter", function()
-                GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
-                GameTooltip:SetText(tooltip, nil, nil, nil, nil, true)
-                GameTooltip:Show()
+                tooltipFrame:SetOwner(this, "ANCHOR_RIGHT")
+                tooltipFrame:SetText(tooltip, nil, nil, nil, nil, true)
+                tooltipFrame:Show()
             end)
-            cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            cb:SetScript("OnLeave", function() tooltipFrame:Hide() end)
             return cb
         end
         row.showCB = CreateRowToggle("Auto-show", "Auto-show this window the moment combat starts.", 0)
@@ -1203,16 +1204,16 @@ local function CreateMinimapButton()
     end)
 
     btn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(this, "ANCHOR_LEFT")
+        tooltipFrame:SetOwner(this, "ANCHOR_LEFT")
         local r, g, b, hex = CL.GetThemeColor()
-        GameTooltip:SetText("|cff" .. hex .. "CombatLedger|r")
-        GameTooltip:AddLine("Click to toggle the meter", 1, 1, 1)
-        GameTooltip:AddLine("Right-click for Options", 1, 1, 1)
-        GameTooltip:AddLine("Drag to move this button", 0.7, 0.7, 0.7)
-        GameTooltip:Show()
+        tooltipFrame:SetText("|cff" .. hex .. "CombatLedger|r")
+        tooltipFrame:AddLine("Click to toggle the meter", 1, 1, 1)
+        tooltipFrame:AddLine("Right-click for Options", 1, 1, 1)
+        tooltipFrame:AddLine("Drag to move this button", 0.7, 0.7, 0.7)
+        tooltipFrame:Show()
     end)
     btn:SetScript("OnLeave", function()
-        GameTooltip:Hide()
+        tooltipFrame:Hide()
     end)
 
     return btn

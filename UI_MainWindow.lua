@@ -18,6 +18,7 @@
 ]]
 
 local CL = CombatLedger
+local tooltipFrame = CL.Tooltip
 local UI = {}
 CL.UI = UI
 
@@ -301,15 +302,15 @@ end
 -- recap available (it's not saved into history), so a saved encounter's
 -- Deaths tab just shows the count with no further detail.
 local function ShowDeathTooltip(bar, u)
-    GameTooltip:SetOwner(bar, "ANCHOR_RIGHT")
-    GameTooltip:AddLine(u.name, ClassColor(u.classToken))
-    GameTooltip:AddDoubleLine("Deaths", tostring(u.deaths or 0), 1, 1, 1, 1, 1, 1)
+    tooltipFrame:SetOwner(bar, "ANCHOR_RIGHT")
+    tooltipFrame:AddLine(u.name, ClassColor(u.classToken))
+    tooltipFrame:AddDoubleLine("Deaths", tostring(u.deaths or 0), 1, 1, 1, 1, 1, 1)
 
     local recap = CL.Aggregator.GetDeathRecap(bar.guid)
     local hits = recap and recap.hits
     if hits and table.getn(hits) > 0 then
-        GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("Last death (most recent first):", 1, 0.82, 0)
+        tooltipFrame:AddLine(" ")
+        tooltipFrame:AddLine("Last death (most recent first):", 1, 0.82, 0)
         local n = table.getn(hits)
         local shown = 0
         local i
@@ -319,15 +320,15 @@ local function ShowDeathTooltip(bar, u)
             local h = hits[i]
             local label = (shown == 1) and ("Killing blow: " .. h.attacker .. " (" .. h.label .. ")")
                 or (h.attacker .. " (" .. h.label .. ")")
-            GameTooltip:AddDoubleLine(label, FormatNumber(h.amount) .. (h.isCrit and " CRIT" or ""),
+            tooltipFrame:AddDoubleLine(label, FormatNumber(h.amount) .. (h.isCrit and " CRIT" or ""),
                 0.9, 0.9, 0.9, 1, 1, 1)
         end
     else
-        GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("No hit history recorded for this death", 0.6, 0.6, 0.6)
+        tooltipFrame:AddLine(" ")
+        tooltipFrame:AddLine("No hit history recorded for this death", 0.6, 0.6, 0.6)
     end
 
-    GameTooltip:Show()
+    tooltipFrame:Show()
 end
 
 -- The actual encounter object behind whatever segment this window has
@@ -357,21 +358,21 @@ local TOOLTIP_TOP_SPELLS = 5
 local function AddTopList(title, list, limit, grandTotal)
     local n = table.getn(list)
     if n == 0 then return end
-    GameTooltip:AddLine(" ")
-    GameTooltip:AddLine(title, 1, 0.82, 0)
+    tooltipFrame:AddLine(" ")
+    tooltipFrame:AddLine(title, 1, 0.82, 0)
     local function Pct(value)
         return (grandTotal > 0) and string.format(" (%.1f%%)", value / grandTotal * 100) or ""
     end
     local shown = (n > limit) and limit or n
     local i
     for i = 1, shown do
-        GameTooltip:AddDoubleLine(list[i].name, FormatNumber(list[i].total) .. Pct(list[i].total),
+        tooltipFrame:AddDoubleLine(list[i].name, FormatNumber(list[i].total) .. Pct(list[i].total),
             0.9, 0.9, 0.9, 1, 1, 1)
     end
     if n > shown then
         local rest = 0
         for i = shown + 1, n do rest = rest + list[i].total end
-        GameTooltip:AddDoubleLine("...and " .. (n - shown) .. " more", FormatNumber(rest) .. Pct(rest),
+        tooltipFrame:AddDoubleLine("...and " .. (n - shown) .. " more", FormatNumber(rest) .. Pct(rest),
             0.6, 0.6, 0.6, 0.6, 0.6, 0.6)
     end
 end
@@ -385,17 +386,17 @@ local function ShowBarTooltip(inst, bar)
         local t = snapshot and snapshot[bar.guid]
         if not t then return end
         local info = CL.GuidCache and CL.GuidCache.Resolve(bar.guid)
-        GameTooltip:SetOwner(bar, "ANCHOR_RIGHT")
-        GameTooltip:AddLine(t.name, ClassColor(info and info.classToken))
-        GameTooltip:AddDoubleLine("Threat", FormatNumber(t.threat), 1, 1, 1, 1, 1, 1)
-        GameTooltip:AddDoubleLine("% of Tank", t.perc .. "%", 1, 1, 1, 1, 1, 1)
+        tooltipFrame:SetOwner(bar, "ANCHOR_RIGHT")
+        tooltipFrame:AddLine(t.name, ClassColor(info and info.classToken))
+        tooltipFrame:AddDoubleLine("Threat", FormatNumber(t.threat), 1, 1, 1, 1, 1, 1)
+        tooltipFrame:AddDoubleLine("% of Tank", t.perc .. "%", 1, 1, 1, 1, 1, 1)
         if t.melee then
-            GameTooltip:AddLine("In melee range", 0.7, 0.7, 0.7)
+            tooltipFrame:AddLine("In melee range", 0.7, 0.7, 0.7)
         end
         if t.tank then
-            GameTooltip:AddLine("Currently tanking", 1, 0.82, 0)
+            tooltipFrame:AddLine("Currently tanking", 1, 0.82, 0)
         end
-        GameTooltip:Show()
+        tooltipFrame:Show()
         return
     end
 
@@ -420,31 +421,31 @@ local function ShowBarTooltip(inst, bar)
     end
     if duration <= 0 then duration = 1 end
 
-    GameTooltip:SetOwner(bar, "ANCHOR_RIGHT")
-    GameTooltip:AddLine(u.name, ClassColor(u.classToken))
+    tooltipFrame:SetOwner(bar, "ANCHOR_RIGHT")
+    tooltipFrame:AddLine(u.name, ClassColor(u.classToken))
     if COUNT_ONLY_MODES[mode] then
-        GameTooltip:AddDoubleLine(MODE_TITLES[mode] or "Total", CountLabel(mode, total), 1, 1, 1, 1, 1, 1)
+        tooltipFrame:AddDoubleLine(MODE_TITLES[mode] or "Total", CountLabel(mode, total), 1, 1, 1, 1, 1, 1)
     else
-        GameTooltip:AddDoubleLine(MODE_TITLES[mode] or "Total", FormatNumber(total), 1, 1, 1, 1, 1, 1)
-        GameTooltip:AddDoubleLine("Rate", FormatNumber(total / duration) .. " " .. CL.RateSuffix(mode), 1, 1, 1, 1, 1, 1)
+        tooltipFrame:AddDoubleLine(MODE_TITLES[mode] or "Total", FormatNumber(total), 1, 1, 1, 1, 1, 1)
+        tooltipFrame:AddDoubleLine("Rate", FormatNumber(total / duration) .. " " .. CL.RateSuffix(mode), 1, 1, 1, 1, 1, 1)
     end
-    GameTooltip:AddDoubleLine("Duration", string.format("%.1fs", duration), 1, 1, 1, 1, 1, 1)
+    tooltipFrame:AddDoubleLine("Duration", string.format("%.1fs", duration), 1, 1, 1, 1, 1, 1)
 
     if mode == "healing" and u.healingDone then
         CL.AddOverhealLines(u.healingDone, function(label, value, dim)
             local c = dim and 0.6 or 1
-            GameTooltip:AddDoubleLine(label, value, c, c, c, c, c, c)
+            tooltipFrame:AddDoubleLine(label, value, c, c, c, c, c, c)
         end)
     end
 
     if mode == "damage" or mode == "taken" then
         local bucket = (mode == "taken") and u.damageTaken or u.damageDone
         local hits = CL.AddAvoidanceLines(bucket, mode,
-            function(label, value) GameTooltip:AddDoubleLine(label, value, 1, 1, 1, 1, 1, 1) end,
-            function(text) GameTooltip:AddLine(text, 0.7, 0.7, 0.7) end,
+            function(label, value) tooltipFrame:AddDoubleLine(label, value, 1, 1, 1, 1, 1, 1) end,
+            function(text) tooltipFrame:AddLine(text, 0.7, 0.7, 0.7) end,
             (mode == "damage") and u.pendingCasts or nil)
         CL.AddMitigationLines(bucket, hits, function(label, value)
-            GameTooltip:AddDoubleLine(label, value, 1, 1, 1, 1, 1, 1)
+            tooltipFrame:AddDoubleLine(label, value, 1, 1, 1, 1, 1, 1)
         end)
     end
 
@@ -452,9 +453,9 @@ local function ShowBarTooltip(inst, bar)
     AddTopList("By spell:", BuildSpellSummary(u, mode), TOOLTIP_TOP_SPELLS, total)
 
     -- The tooltip is a summary; the full lists live in the breakdown.
-    GameTooltip:AddLine(" ")
-    GameTooltip:AddLine("Click for the full breakdown", 0.5, 0.5, 0.5)
-    GameTooltip:Show()
+    tooltipFrame:AddLine(" ")
+    tooltipFrame:AddLine("Click for the full breakdown", 0.5, 0.5, 0.5)
+    tooltipFrame:Show()
 end
 
 local function CreateBar(inst, parent, index)
@@ -528,7 +529,7 @@ local function CreateBar(inst, parent, index)
         end
     end)
     bar:SetScript("OnEnter", function() ShowBarTooltip(inst, bar) end)
-    bar:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    bar:SetScript("OnLeave", function() tooltipFrame:Hide() end)
 
     bar.targetPct = 0
     bar:Hide()
@@ -787,14 +788,14 @@ local function SetButtonTooltip(btn, title, subtitle, restR, restG, restB, alway
         local isOver = MouseIsOver(btn)
         if isOver ~= wasOver then
             if isOver then
-                GameTooltip:SetOwner(btn, "ANCHOR_BOTTOM")
-                GameTooltip:SetText(title, 1, 1, 1)
+                tooltipFrame:SetOwner(btn, "ANCHOR_BOTTOM")
+                tooltipFrame:SetText(title, 1, 1, 1)
                 if subtitle then
-                    GameTooltip:AddLine(subtitle, 0.7, 0.7, 0.7)
+                    tooltipFrame:AddLine(subtitle, 0.7, 0.7, 0.7)
                 end
-                GameTooltip:Show()
+                tooltipFrame:Show()
             else
-                GameTooltip:Hide()
+                tooltipFrame:Hide()
             end
             wasOver = isOver
         end
@@ -1082,11 +1083,11 @@ local function CreateWindowFrame(inst)
     grip:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8" })
     grip:SetBackdropColor(themeR, themeG, themeB, 0.4)
     grip:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(this, "ANCHOR_LEFT")
-        GameTooltip:SetText("Drag to resize")
-        GameTooltip:Show()
+        tooltipFrame:SetOwner(this, "ANCHOR_LEFT")
+        tooltipFrame:SetText("Drag to resize")
+        tooltipFrame:Show()
     end)
-    grip:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    grip:SetScript("OnLeave", function() tooltipFrame:Hide() end)
     grip:SetScript("OnMouseDown", function()
         if CL.GetSetting("lockWindow") then return end
         this.sizing = true

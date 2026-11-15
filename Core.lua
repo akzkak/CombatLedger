@@ -13,6 +13,9 @@
 CombatLedger = CombatLedger or {}
 local CL = CombatLedger
 
+-- Use the stock template without taking ownership of Blizzard's shared tooltip.
+CL.Tooltip = CreateFrame("GameTooltip", "CombatLedgerTooltip", UIParent, "GameTooltipTemplate")
+
 -- Key Bindings panel labels for Bindings.xml's toggle action.
 BINDING_HEADER_COMBATLEDGER_TITLE = "CombatLedger"
 BINDING_NAME_COMBATLEDGER_TOGGLE = "Toggle CombatLedger windows"
@@ -899,14 +902,29 @@ end
 -- Debug logging to CL.LOG_FILENAME (/cl debug). Off by default.
 CL.debug = false
 
+local tooltipSkinned = false
+local function SkinTooltip()
+    if tooltipSkinned or not pfUI or not pfUI.api or not pfUI_config then return end
+    if pfUI_config.disabled and pfUI_config.disabled.skin_Tooltips == "1" then return end
+    local api = pfUI.api
+    if not (api.CreateBackdrop and api.CreateBackdropShadow) then return end
+    -- The template uses the same font objects that pfUI configures globally.
+    -- Apply the backdrop and shadow from pfUI's tooltip skin to our frame.
+    local config = pfUI_config.tooltip
+    api.CreateBackdrop(CL.Tooltip, nil, nil, config and tonumber(config.alpha))
+    api.CreateBackdropShadow(CL.Tooltip)
+    tooltipSkinned = true
+end
+
 -- The persisted debug flag is restored on PLAYER_ENTERING_WORLD
 -- (SavedVariables aren't loaded yet when this file runs). Core loads
 -- first, so this handler runs before any other file's handler for the
 -- same event and debug output covers login too.
-local debugRestoreFrame = CreateFrame("Frame")
-debugRestoreFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-debugRestoreFrame:SetScript("OnEvent", function()
+local worldFrame = CreateFrame("Frame")
+worldFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+worldFrame:SetScript("OnEvent", function()
     CL.debug = (CombatLedgerDB.settings.debug == true)
+    SkinTooltip()
 end)
 
 -- Test mode (session only): windows show fabricated data for previewing
