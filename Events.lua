@@ -413,7 +413,7 @@ local function ApplyReset(mode, reason)
         if CL.UI and CL.UI.RefreshAllInstances then CL.UI.RefreshAllInstances() end
         CL.Print("Data reset - " .. reason)
     elseif mode == "ask" then
-        StaticPopup_Show("COMBATLEDGER_RESET_DATA", reason)
+        StaticPopup_Show("COMBATLEDGER_AUTO_RESET_DATA", reason)
     end
 end
 

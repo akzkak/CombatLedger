@@ -1715,22 +1715,35 @@ driver:SetScript("OnUpdate", function()
     if not ok then CL.RecordError("UI:refresh", err) end
 end)
 
--- Manual reset (the R button) and the automatic reset rules
--- (Events.lua); %s is the reason or a note.
-StaticPopupDialogs["COMBATLEDGER_RESET_DATA"] = {
-    text = "Reset Current Fight and Overall?\n%s",
-    button1 = "Yes",
-    button2 = "No",
-    OnAccept = function()
-        CL.Aggregator.ResetData()
-        UI.RefreshAllInstances()
-        CL.Print("Data reset.")
-    end,
-    timeout = 0,
-    whileDead = 1,
-    hideOnEscape = 1,
-    exclusive = 1,
-}
+local function AcceptReset()
+    CL.Aggregator.ResetData()
+    UI.RefreshAllInstances()
+    CL.Print("Data reset.")
+end
+
+local function ResetDialog(onAccept)
+    return {
+        text = "Reset Current Fight and Overall?\n%s",
+        button1 = "Yes",
+        button2 = "No",
+        OnAccept = onAccept,
+        timeout = 0,
+        whileDead = 1,
+        hideOnEscape = 1,
+        exclusive = 1,
+    }
+end
+
+StaticPopupDialogs["COMBATLEDGER_RESET_DATA"] = ResetDialog(AcceptReset)
+StaticPopupDialogs["COMBATLEDGER_AUTO_RESET_DATA"] = ResetDialog(function()
+    -- A pull can start after the automatic confirmation was shown.
+    if CL.Aggregator.GetCurrent() or CL.GuidCache.UnitInCombat("player")
+        or CL.GuidCache.AnyGroupMemberInCombat() then
+        CL.Print("Automatic reset skipped during combat.")
+        return
+    end
+    AcceptReset()
+end)
 
 StaticPopupDialogs["COMBATLEDGER_ANNOUNCE"] = {
     text = "Post the top %d to chat?", -- %d filled in from StaticPopup_Show's text_arg1 (the announce count)
