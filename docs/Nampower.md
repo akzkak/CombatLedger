@@ -10,6 +10,8 @@ Standard Vanilla WoW combat parsing requires listening to `CHAT_MSG_COMBAT_*` ev
 
 Nampower bypasses this by intercepting server packets and surfacing exact, structured events directly to Lua.
 
+Nampower 4.5 and later enable the relevant event streams when CombatLedger registers for them. CombatLedger leaves Nampower's shared settings alone. Older builds still need their event settings enabled. If a stream is missing on an older build, run `/cl status` to see which settings are off and which data they affect.
+
 ### Nampower Combat Events
 CombatLedger subscribes to the following custom events exposed by Nampower:
 

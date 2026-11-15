@@ -1,6 +1,6 @@
 --[[
-    Events - the event pipeline. Enables the Nampower CVars the combat
-    events are gated behind, decodes each event's arguments and hands the
+    Events - the event pipeline. Registers Nampower combat events,
+    decodes each event's arguments and hands the
     result to the Aggregator; also owns encounter start/end timing and the
     /cl slash command.
 
@@ -14,22 +14,6 @@
 ]]
 
 local CL = CombatLedger
-
-local cvarsToEnable = {
-    "NP_EnableAutoAttackEvents",
-    "NP_EnableSpellStartEvents",
-    "NP_EnableSpellGoEvents",
-    "NP_EnableSpellHealEvents",
-    "NP_EnableSpellEnergizeEvents",
-    "NP_EnableAuraCastEvents", -- AURA_CAST_ON_*, for the debuffs-given correlation below
-    -- SPELL_DISPEL_* and BUFF/DEBUFF_ADDED_* need no CVar.
-}
-local function EnableCVars()
-    local i
-    for i = 1, table.getn(cvarsToEnable) do
-        pcall(SetCVar, cvarsToEnable[i], "1")
-    end
-end
 
 -- Spell name from the DBC, cached per spellId since it runs on nearly
 -- every event and never changes. false caches a failed lookup so it
@@ -521,7 +505,6 @@ local function Dispatch()
         return
     end
     if event == "PLAYER_ENTERING_WORLD" then
-        EnableCVars()
         CL.GuidCache.Purge()
         CL.GuidCache.RefreshRoster()
         -- Once per session, not per loading screen. SavedVariables are
@@ -792,6 +775,8 @@ f:RegisterEvent("RAID_ROSTER_UPDATE")
 f:RegisterEvent("UNIT_PET")
 f:RegisterEvent("PLAYER_REGEN_DISABLED")
 f:RegisterEvent("PLAYER_REGEN_ENABLED")
+-- Nampower 4.5+ enables event families on registration. Older builds
+-- still use their CVars, which /cl status checks without changing them.
 f:RegisterEvent("AUTO_ATTACK_SELF")
 f:RegisterEvent("AUTO_ATTACK_OTHER")
 f:RegisterEvent("SPELL_DAMAGE_EVENT_SELF")
@@ -825,6 +810,7 @@ f:RegisterEvent("UNIT_DIED")
 -- lifecycle events so status can show whether combat data is arriving.
 local COMBAT_EVENTS = {
     "AUTO_ATTACK_SELF", "AUTO_ATTACK_OTHER", "SPELL_DAMAGE_EVENT_SELF", "SPELL_DAMAGE_EVENT_OTHER",
+    "SPELL_GO_SELF", "SPELL_GO_OTHER",
     "SPELL_HEAL_BY_SELF", "SPELL_HEAL_BY_OTHER", "SPELL_MISS_SELF", "SPELL_MISS_OTHER",
     "ENVIRONMENTAL_DMG_SELF", "ENVIRONMENTAL_DMG_OTHER", "DAMAGE_SHIELD_SELF", "DAMAGE_SHIELD_OTHER",
     "SPELL_DISPEL_BY_SELF", "SPELL_DISPEL_BY_OTHER", "AURA_CAST_ON_SELF", "AURA_CAST_ON_OTHER",
@@ -833,23 +819,52 @@ local COMBAT_EVENTS = {
 
 local function YesNo(v) return v and "|cff40ff40yes|r" or "|cffff4040no|r" end
 
+local LEGACY_EVENT_SETTINGS = {
+    { "NP_EnableAutoAttackEvents", "melee swings" },
+    { "NP_EnableSpellGoEvents", "summon ownership and spell threat" },
+    { "NP_EnableSpellHealEvents", "healing" },
+    { "NP_EnableSpellEnergizeEvents", "power gain debug events" },
+    { "NP_EnableAuraCastEvents", "debuff attribution and cast counts" },
+}
+
+local function ReadNampowerVersion()
+    if type(GetNampowerVersion) ~= "function" then return "not loaded" end
+    local ok, major, minor, patch = pcall(GetNampowerVersion)
+    if not ok then return "unknown" end
+    if type(major) == "string" and minor == nil then
+        local _, _, a, b = string.find(major, "(%d+)%.(%d+)")
+        return major, tonumber(a), tonumber(b)
+    end
+    major, minor = tonumber(major), tonumber(minor)
+    if not major or not minor then return "unknown" end
+    local version = major .. "." .. minor
+    if patch then version = version .. "." .. tostring(patch) end
+    return version, major, minor
+end
+
+local function PrintLegacyEventSettings(major, minor)
+    if not major or major > 4 or (major == 4 and minor >= 5) then return end
+    if type(GetCVar) ~= "function" then return end
+    local i
+    for i = 1, table.getn(LEGACY_EVENT_SETTINGS) do
+        local setting = LEGACY_EVENT_SETTINGS[i]
+        local ok, value = pcall(GetCVar, setting[1])
+        if ok and (value == "0" or value == 0 or value == false) then
+            CL.Print("  Disabled Nampower setting: " .. setting[1] .. " (" .. setting[2] .. ")")
+        end
+    end
+end
+
 local function PrintStatus()
     local version = (GetAddOnMetadata and GetAddOnMetadata("CombatLedger", "Version")) or "?"
     CL.Print("Status (v" .. version .. ")")
 
     -- Data source: Nampower's events plus SuperWoW's GUID-as-unit support.
-    local npVersion = "not loaded"
-    if GetNampowerVersion then
-        local ok, a, b, c = pcall(GetNampowerVersion)
-        if ok and a then
-            npVersion = tostring(a)
-            if b then npVersion = npVersion .. "." .. tostring(b) end
-            if c then npVersion = npVersion .. "." .. tostring(c) end
-        end
-    end
+    local npVersion, npMajor, npMinor = ReadNampowerVersion()
     local okGuid, _, playerGuid = pcall(UnitExists, "player")
     CL.Print(string.format("  Nampower: %s   GUID units: %s   Debug log file: %s   Debug: %s",
         npVersion, YesNo(okGuid and playerGuid), YesNo(WriteCustomFile ~= nil), CL.debug and "on" or "off"))
+    PrintLegacyEventSettings(npMajor, npMinor)
 
     local diag = CL.Diagnostics
     local combatTotal = 0
@@ -943,5 +958,4 @@ SlashCmdList["COMBATLEDGER"] = function(msg)
     end
 end
 
-EnableCVars()
 CL.Print("Loaded. /cl toggle to show the meter, /cl options for settings, /cl help for commands.")
