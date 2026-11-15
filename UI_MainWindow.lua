@@ -64,6 +64,8 @@ local SEGMENT_LABELS = { current = "Current", overall = "Overall", history = "Hi
 local instances = {}
 local instanceOrder = {}
 CL.UIWindows = instances
+local combatModesActive = false
+local hiddenByToggle
 
 -- The window an announce confirmation is for; set before showing the
 -- COMBATLEDGER_ANNOUNCE popup and read in its OnAccept.
@@ -863,6 +865,23 @@ local function AnnounceTop(inst)
     end
 end
 
+local function GetRestingView(inst, saved)
+    local mode = saved.mode or inst.defaultMode or "damage"
+    local segment = saved.segment or inst.defaultSegment or "current"
+    local encounter
+    if segment == "history" then
+        encounter = CL.History and CL.History.FindEncounter(saved.historyId)
+        if not encounter then segment = "current" end
+    end
+    return mode, segment, encounter
+end
+
+local function GetCombatMode(inst, saved)
+    if not combatModesActive or saved.manualInCombat then return end
+    local mode = CL.GetWindowOption(inst.id, "combatMode", "")
+    if mode ~= "" then return mode end
+end
+
 -- `inst.defaultMode`/`defaultSegment` seed a fresh window (ignored once
 -- a saved window state - see CL.GetWindowState - already has values).
 local function CreateWindowFrame(inst)
@@ -885,24 +904,35 @@ local function CreateWindowFrame(inst)
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", function()
         if CL.GetSetting("lockWindow") then return end
+        CL.SaveLayout(id, this)
         this:StartMoving()
     end)
     f:SetScript("OnDragStop", function()
         this:StopMovingOrSizing()
-        CL.SaveLayout(id, this)
+        if not CL.SaveLayout(id, this) then
+            CL.ApplyLayout(id, this, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MAX_WINDOW_WIDTH, MAX_WINDOW_HEIGHT)
+        end
     end)
     f:Hide()
 
     CL.ApplyLayout(id, f, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MAX_WINDOW_WIDTH, MAX_WINDOW_HEIGHT)
 
     local savedWinState = CL.GetWindowState(id)
-    f.mode = (savedWinState and savedWinState.mode) or inst.defaultMode or "damage"
-    f.segment = (savedWinState and savedWinState.segment) or inst.defaultSegment or "current"
+    if not savedWinState then
+        CL.SaveWindowState(id, inst.defaultMode or "damage", inst.defaultSegment or "current")
+        savedWinState = CL.GetWindowState(id)
+    end
+    local combatMode = GetCombatMode(inst, savedWinState)
+    if combatMode then
+        f.mode, f.segment = combatMode, "current"
+    else
+        f.mode, f.segment, f.historyEncounter = GetRestingView(inst, savedWinState)
+    end
     -- Threat's own filter (which roster names to show - see
     -- ShowThreatFilterDropdown) instead of Current/Overall/History,
     -- since threat has neither. [name] = true means "included"; empty
     -- means "show everyone".
-    f.threatFilter = (savedWinState and savedWinState.threatFilter) or {}
+    f.threatFilter = savedWinState.threatFilter or {}
 
     -- Not in UISpecialFrames: a meter shouldn't close on a stray Escape.
     -- The mode and segment buttons double as the title.
@@ -951,7 +981,8 @@ local function CreateWindowFrame(inst)
             SetHeaderButtonText(segBtn, "Filter", true)
             SetButtonTooltip(segBtn, "Filter", "Choose which raid/party members show up in Threat mode", themeR, themeG, themeB)
         else
-            SetHeaderButtonText(segBtn, SEGMENT_LABELS[f.segment], true)
+            local label = f.historyEncounter and f.historyEncounter.label or SEGMENT_LABELS[f.segment]
+            SetHeaderButtonText(segBtn, label, true)
             SetButtonTooltip(segBtn, "Segment", "Current Fight / Overall / a recent saved encounter", themeR, themeG, themeB)
         end
     end
@@ -967,16 +998,10 @@ local function CreateWindowFrame(inst)
         local options = {}
         local classColor = PlayerClassColorTable()
         table.insert(options, { label = "Overall", color = classColor, onClick = function()
-            f.segment = "overall"
-            SetHeaderButtonText(segBtn, SEGMENT_LABELS.overall, true)
-            CL.SaveWindowState(id, f.mode, f.segment, f.threatFilter)
-            RefreshInstance(inst)
+            f.SetView(f.mode, "overall", nil, true)
         end })
         table.insert(options, { label = "Current", color = classColor, onClick = function()
-            f.segment = "current"
-            SetHeaderButtonText(segBtn, SEGMENT_LABELS.current, true)
-            CL.SaveWindowState(id, f.mode, f.segment, f.threatFilter)
-            RefreshInstance(inst)
+            f.SetView(f.mode, "current", nil, true)
         end })
         if CL.History then
             local hist = CL.History.GetShownHistory()
@@ -1000,17 +1025,19 @@ local function CreateWindowFrame(inst)
     SetHeaderButtonText(modeBtn, MODE_TITLES[f.mode] or f.mode, false)
     modeBtn:SetPoint("RIGHT", segBtn, "LEFT", -4, 0)
 
-    -- Switches this window's mode. `persist` saves it as the window's
-    -- chosen mode; the automatic in-combat switch (UI.ApplyCombatModes)
-    -- doesn't, so a reload mid-fight comes back in the chosen mode.
-    local function SetMode(key, persist)
-        f.mode = key
+    -- Automatic switches leave the saved view intact. A manual mode
+    -- or segment choice becomes the resting view and overrides combat mode.
+    local function SetView(key, segment, encounter, persist)
+        f.mode, f.segment, f.historyEncounter = key, segment, encounter
         SetHeaderButtonText(modeBtn, MODE_TITLES[key] or key, false)
         UpdateSegButtonForMode()
-        if persist then CL.SaveWindowState(id, f.mode, f.segment, f.threatFilter) end
+        if persist then
+            local historyId = encounter and CL.History and CL.History.GetEncounterId(encounter)
+            CL.SaveWindowState(id, key, segment, f.threatFilter, historyId, combatModesActive or nil)
+        end
         RefreshInstance(inst)
     end
-    f.SetMode = SetMode
+    f.SetView = SetView
 
     modeBtn:SetScript("OnClick", function()
         -- Same explicit reset as segBtn above - see that comment.
@@ -1020,9 +1047,7 @@ local function CreateWindowFrame(inst)
         for i = 1, table.getn(MODE_ORDER) do
             local key = MODE_ORDER[i]
             table.insert(options, { label = MODE_TITLES[key] or key, onClick = function()
-                -- A manual pick during combat is kept after the fight.
-                inst.restoreMode = nil
-                SetMode(key, true)
+                SetView(key, f.segment, f.historyEncounter, true)
             end })
         end
         CL.ShowDropdown(modeBtn, options)
@@ -1327,7 +1352,7 @@ ShowThreatFilterDropdown = function(inst)
                     else
                         f.threatFilter[name] = true
                     end
-                    CL.SaveWindowState(inst.id, f.mode, f.segment, f.threatFilter)
+                    CL.GetWindowState(inst.id).threatFilter = f.threatFilter
                     RefreshInstance(inst)
                     ShowThreatFilterDropdown(inst)
                 end,
@@ -1335,7 +1360,7 @@ ShowThreatFilterDropdown = function(inst)
         end
         table.insert(options, { label = "|cffff5555Clear Filter (show everyone)|r", onClick = function()
             f.threatFilter = {}
-            CL.SaveWindowState(inst.id, f.mode, f.segment, f.threatFilter)
+            CL.GetWindowState(inst.id).threatFilter = f.threatFilter
             RefreshInstance(inst)
         end })
     end
@@ -1371,12 +1396,7 @@ end
 function UI.ShowHistoryEncounterIn(inst, encounter)
     if not encounter then return end
     if not inst.frame then CreateWindowFrame(inst) end
-    inst.frame.segment = "history"
-    inst.frame.historyEncounter = encounter
-    if inst.frame.segBtn then
-        SetHeaderButtonText(inst.frame.segBtn, encounter.label or SEGMENT_LABELS.history, true)
-    end
-    CL.SaveWindowState(inst.id, inst.frame.mode, inst.frame.segment, inst.frame.threatFilter)
+    inst.frame.SetView(inst.frame.mode, "history", encounter, true)
     inst.frame:Show()
     RefreshInstance(inst)
 end
@@ -1452,7 +1472,11 @@ end
 -- shouldn't be there. Auto-show isn't consulted: it reacts to combat
 -- starting, not to a window's resting state.
 function UI.RestoreAllWindows()
+    combatModesActive = CL.GuidCache.UnitInCombat("player") or
+        (CL.Aggregator.GetCurrent() ~= nil and CL.GuidCache.AnyGroupMemberInCombat())
     local function RestoreOne(id, inst)
+        local saved = CL.GetWindowState(id)
+        if saved and not combatModesActive then saved.manualInCombat = nil end
         if UI.IsSuppressedNow(id) then
             CreateWindowFrame(inst)
             inst.frame:Hide()
@@ -1480,11 +1504,10 @@ end
 
 local mainInst = NewInstance("main")
 
--- Show/Hide/Toggle act on every meter window (minimap click, /cl
--- toggle, keybind). Toggle decides on/off from the main window's state.
--- Show skips windows whose own rules forbid them right now
--- (UI.IsSuppressedNow).
+-- Explicit show/hide commands affect every meter window. Toggle also
+-- remembers which windows it hid, including when the main one was hidden.
 function UI.Show()
+    hiddenByToggle = nil
     local id, inst
     for id, inst in pairs(instances) do
         if not UI.IsSuppressedNow(id) then
@@ -1494,6 +1517,7 @@ function UI.Show()
 end
 
 function UI.Hide()
+    hiddenByToggle = nil
     local id, inst
     for id, inst in pairs(instances) do
         if inst.frame then inst.frame:Hide() end
@@ -1501,11 +1525,25 @@ function UI.Hide()
 end
 
 function UI.Toggle()
-    if mainInst.frame and mainInst.frame:IsShown() then
-        UI.Hide()
-    else
-        UI.Show()
+    local id, inst
+    if hiddenByToggle then
+        local restore = hiddenByToggle
+        hiddenByToggle = nil
+        for id in pairs(restore) do
+            inst = instances[id]
+            if inst and not UI.IsSuppressedNow(id) then ShowInstance(inst) end
+        end
+        return
     end
+
+    local hidden = {}
+    for id, inst in pairs(instances) do
+        if inst.frame and inst.frame:IsShown() then
+            hidden[id] = true
+            inst.frame:Hide()
+        end
+    end
+    if next(hidden) then hiddenByToggle = hidden else UI.Show() end
 end
 
 -- One-time copy of Main's size/position onto window `id` (not a lasting
@@ -1535,6 +1573,7 @@ end
 -- currently grouped (e.g. a Threat meter that should only ever appear
 -- for a real pull, not solo combat).
 function UI.ApplyAutoShow()
+    if hiddenByToggle then return end
     local id, inst
     for id, inst in pairs(instances) do
         if CL.GetWindowOption(id, "autoShowInCombat", true) then
@@ -1556,25 +1595,24 @@ function UI.ApplyAutoHide()
     end
 end
 
--- Per-window "In combat" mode (window option combatMode, "" = off): on
--- combat start a window switches to it, remembering its own mode; when
--- the fight ends it switches back, unless the mode was changed by hand
--- in between.
+-- Combat mode displays Current Fight over the saved resting view.
+-- A deliberate selection persists as the new resting view.
 function UI.ApplyCombatModes(inCombat)
+    if inCombat == combatModesActive then return end
+    combatModesActive = inCombat
     local id, inst
     for id, inst in pairs(instances) do
         local f = inst.frame
-        if f and f.SetMode then
-            if inCombat then
-                local combatMode = CL.GetWindowOption(id, "combatMode", "")
-                if combatMode ~= "" and combatMode ~= f.mode then
-                    inst.restoreMode = f.mode
-                    f.SetMode(combatMode, false)
+        local saved = CL.GetWindowState(id)
+        if saved then
+            if not inCombat then saved.manualInCombat = nil end
+            if f then
+                local mode = GetCombatMode(inst, saved)
+                if mode then
+                    f.SetView(mode, "current")
+                elseif not inCombat then
+                    f.SetView(GetRestingView(inst, saved))
                 end
-            elseif inst.restoreMode then
-                local mode = inst.restoreMode
-                inst.restoreMode = nil
-                f.SetMode(mode, false)
             end
         end
     end
@@ -1599,7 +1637,7 @@ function UI.ReconcileGroupVisibility()
         if CL.GetWindowOption(id, "onlyShowGrouped", false) then
             if not IsGrouped() then
                 if inst.frame then inst.frame:Hide() end
-            elseif CL.GetWindowOption(id, "autoShowInCombat", true) and not UI.IsSuppressedNow(id) then
+            elseif not hiddenByToggle and CL.GetWindowOption(id, "autoShowInCombat", true) and not UI.IsSuppressedNow(id) then
                 ShowInstance(inst)
             end
         end

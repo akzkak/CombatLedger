@@ -134,6 +134,26 @@ local function GetHistory()
     return list
 end
 
+-- A saved view must survive history inserts and reloads. Allocate a stable
+-- id when a fight is first selected, including fights saved by old versions.
+local function GetEncounterId(encounter)
+    if not encounter.historyId then
+        local id = (CombatLedgerDB.nextHistoryId or 0) + 1
+        CombatLedgerDB.nextHistoryId = id
+        encounter.historyId = id
+    end
+    return encounter.historyId
+end
+
+local function FindEncounter(id)
+    if not id then return end
+    local list = GetHistory()
+    local i
+    for i = 1, table.getn(list) do
+        if list[i].historyId == id then return list[i] end
+    end
+end
+
 -- A saved boss fight. pullBy is only ever set for bosses, which also
 -- covers fights saved before isBoss existed.
 local function IsBossFight(encounter)
@@ -175,6 +195,8 @@ end
 CL.History = {
     SaveEncounter = SaveEncounter,
     GetHistory = GetHistory,
+    GetEncounterId = GetEncounterId,
+    FindEncounter = FindEncounter,
     GetShownHistory = GetShownHistory,
     IsBossFight = IsBossFight,
     DeleteEncounter = DeleteEncounter,

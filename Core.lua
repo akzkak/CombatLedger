@@ -102,17 +102,31 @@ function CL.GetLayout(key)
     return CombatLedgerDB.layout[key]
 end
 
+local ANCHOR_POINTS = {
+    TOPLEFT = true, TOP = true, TOPRIGHT = true,
+    LEFT = true, CENTER = true, RIGHT = true,
+    BOTTOMLEFT = true, BOTTOM = true, BOTTOMRIGHT = true,
+}
+
+local function ValidOffset(value)
+    return type(value) == "number" and value - value == 0
+end
+
+local function ValidAnchor(point, relPoint, x, y)
+    return ANCHOR_POINTS[point] and ANCHOR_POINTS[relPoint] and ValidOffset(x) and ValidOffset(y)
+end
+
 function CL.SaveLayout(key, frame)
     EnsureLayoutTable()
     local point, _, relPoint, x, y = frame:GetPoint(1)
-    CombatLedgerDB.layout[key] = {
-        width = frame:GetWidth(),
-        height = frame:GetHeight(),
-        point = point or "CENTER",
-        relPoint = relPoint or "CENTER",
-        x = x or 0,
-        y = y or 0,
-    }
+    local saved = CombatLedgerDB.layout[key] or {}
+    saved.width, saved.height = frame:GetWidth(), frame:GetHeight()
+    local valid = ValidAnchor(point, relPoint, x, y)
+    if valid then
+        saved.point, saved.relPoint, saved.x, saved.y = point, relPoint, x, y
+    end
+    CombatLedgerDB.layout[key] = saved
+    return valid
 end
 
 -- Applies a saved layout if one exists (returns true); otherwise leaves
@@ -133,8 +147,10 @@ function CL.ApplyLayout(key, frame, minW, minH, maxW, maxH)
         if maxH and h > maxH then h = maxH end
         frame:SetHeight(h)
     end
-    frame:ClearAllPoints()
-    frame:SetPoint(saved.point or "CENTER", UIParent, saved.relPoint or "CENTER", saved.x or 0, saved.y or 0)
+    if ValidAnchor(saved.point, saved.relPoint, saved.x, saved.y) then
+        frame:ClearAllPoints()
+        frame:SetPoint(saved.point, UIParent, saved.relPoint, saved.x, saved.y)
+    end
     return true
 end
 
@@ -152,9 +168,12 @@ function CL.GetWindowState(id)
     return CombatLedgerDB.windows[id]
 end
 
-function CL.SaveWindowState(id, mode, segment, threatFilter)
+function CL.SaveWindowState(id, mode, segment, threatFilter, historyId, manualInCombat)
     EnsureWindowsTable()
-    CombatLedgerDB.windows[id] = { mode = mode, segment = segment, threatFilter = threatFilter }
+    CombatLedgerDB.windows[id] = {
+        mode = mode, segment = segment, threatFilter = threatFilter,
+        historyId = historyId, manualInCombat = manualInCombat,
+    }
 end
 
 function CL.ForgetWindowState(id)

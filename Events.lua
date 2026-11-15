@@ -589,8 +589,8 @@ local function Dispatch()
         pendingEndSince = nil
         CL.Aggregator.StartEncounter()
         if CL.UI and CL.UI.ApplyAutoShow then
-            CL.UI.ApplyAutoShow()
             CL.UI.ApplyCombatModes(true)
+            CL.UI.ApplyAutoShow()
         end
         return
     end
@@ -599,6 +599,8 @@ local function Dispatch()
         LogRegenDiagnostic("ENABLED")
         if CL.Aggregator.GetCurrent() then
             pendingEndSince = GetTime()
+        elseif CL.UI and CL.UI.ApplyCombatModes then
+            CL.UI.ApplyCombatModes(false)
         end
         return
     end
